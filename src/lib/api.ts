@@ -41,9 +41,20 @@ export interface Evaluation {
   max_favorable_pct: number;
 }
 
+export interface Stats {
+  total: number;
+  evaluated: number;
+  pending: number;
+  winRate: number | null;
+  avgReturn: number | null;
+  bestReturn: number | null;
+  worstReturn: number | null;
+}
+
 export const api = {
   getCandles: () => fetchJson<Candle[]>('/candles'),
   getSignals: () => fetchJson<Signal[]>('/signals'),
+  getStats: () => fetchJson<Stats>('/signals/stats'),
   updateData: () => fetchJson<{ inserted: number }>('/candles/update', { method: 'POST' }),
   generateSignals: () => fetchJson<{ generated: number; evaluated: number }>('/signals/generate', { method: 'POST' }),
 };
