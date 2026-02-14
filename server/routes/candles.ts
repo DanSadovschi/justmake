@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { supabase } from '../supabase.js';
+import { fetchAllCandlesSince, fetchDailyCandles } from '../binance.js';
 
 export const candlesRouter = Router();
 
@@ -15,4 +16,69 @@ candlesRouter.get('/', async (_req, res) => {
     return;
   }
   res.json(data);
+});
+
+// POST /api/candles/update — fetch new candles from Binance and upsert into DB
+candlesRouter.post('/update', async (_req, res) => {
+  try {
+    // Find the latest candle we already have
+    const { data: latest, error: latestErr } = await supabase
+      .from('candles')
+      .select('open_time')
+      .order('open_time', { ascending: false })
+      .limit(1);
+
+    if (latestErr) {
+      res.status(500).json({ error: latestErr.message });
+      return;
+    }
+
+    let klines;
+    if (latest && latest.length > 0) {
+      // Fetch from 1ms after our latest candle
+      const startTime = latest[0].open_time + 1;
+      klines = await fetchAllCandlesSince(startTime);
+    } else {
+      // First run — fetch up to 1000 most recent daily candles
+      klines = await fetchDailyCandles();
+    }
+
+    if (klines.length === 0) {
+      res.json({ inserted: 0, message: 'Already up to date' });
+      return;
+    }
+
+    // Map to DB rows
+    const rows = klines.map((k) => ({
+      open_time: k.openTime,
+      open: parseFloat(k.open),
+      high: parseFloat(k.high),
+      low: parseFloat(k.low),
+      close: parseFloat(k.close),
+      volume: parseFloat(k.volume),
+      fetched_at: new Date().toISOString(),
+    }));
+
+    // Upsert in batches of 500 (Supabase limit-friendly)
+    const BATCH_SIZE = 500;
+    let totalInserted = 0;
+
+    for (let i = 0; i < rows.length; i += BATCH_SIZE) {
+      const batch = rows.slice(i, i + BATCH_SIZE);
+      const { error: upsertErr } = await supabase
+        .from('candles')
+        .upsert(batch, { onConflict: 'open_time' });
+
+      if (upsertErr) {
+        res.status(500).json({ error: upsertErr.message, inserted: totalInserted });
+        return;
+      }
+      totalInserted += batch.length;
+    }
+
+    res.json({ inserted: totalInserted });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Unknown error';
+    res.status(500).json({ error: message });
+  }
 });
