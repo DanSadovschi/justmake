@@ -51,10 +51,16 @@ export interface Stats {
   worstReturn: number | null;
 }
 
+export interface LivePrice {
+  price: number;
+  timestamp: number;
+}
+
 export const api = {
   getCandles: () => fetchJson<Candle[]>('/candles'),
   getSignals: () => fetchJson<Signal[]>('/signals'),
   getStats: () => fetchJson<Stats>('/signals/stats'),
+  getLivePrice: () => fetchJson<LivePrice>('/price'),
   updateData: () => fetchJson<{ inserted: number }>('/candles/update', { method: 'POST' }),
   generateSignals: () => fetchJson<{ generated: number; evaluated: number }>('/signals/generate', { method: 'POST' }),
 };

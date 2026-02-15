@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef, useCallback } from 'react';
 import { api, type Candle, type Signal, type Stats } from '../lib/api';
 
 function formatDate(ms: number) {
@@ -14,15 +14,29 @@ function formatPct(n: number | null) {
   return `${n >= 0 ? '+' : ''}${n.toFixed(2)}%`;
 }
 
+function timeAgo(ms: number): string {
+  const seconds = Math.floor((Date.now() - ms) / 1000);
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
+}
+
 export default function Dashboard() {
   const [latestCandle, setLatestCandle] = useState<Candle | null>(null);
   const [latestSignal, setLatestSignal] = useState<Signal | null>(null);
   const [stats, setStats] = useState<Stats | null>(null);
+  const [livePrice, setLivePrice] = useState<number | null>(null);
+  const [livePriceTime, setLivePriceTime] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
   const [updating, setUpdating] = useState(false);
   const [message, setMessage] = useState('');
+  const [lastDataUpdate, setLastDataUpdate] = useState<number | null>(null);
+  const autoUpdated = useRef(false);
 
-  async function loadData() {
+  const loadData = useCallback(async () => {
     setLoading(true);
     try {
       const [candles, signals, statsData] = await Promise.all([
@@ -33,12 +47,14 @@ export default function Dashboard() {
       setLatestCandle(candles.length > 0 ? candles[candles.length - 1] : null);
       setLatestSignal(signals.length > 0 ? signals[0] : null);
       setStats(statsData);
+      return candles.length > 0 ? candles[candles.length - 1] : null;
     } catch (err) {
       setMessage(err instanceof Error ? err.message : 'Failed to load data');
+      return null;
     } finally {
       setLoading(false);
     }
-  }
+  }, []);
 
   async function handleUpdate() {
     setUpdating(true);
@@ -49,6 +65,7 @@ export default function Dashboard() {
       setMessage(
         `Fetched ${candleResult.inserted} candles. Generated ${signalResult.generated} signals, evaluated ${signalResult.evaluated}.`
       );
+      setLastDataUpdate(Date.now());
       await loadData();
     } catch (err) {
       setMessage(err instanceof Error ? err.message : 'Update failed');
@@ -57,14 +74,70 @@ export default function Dashboard() {
     }
   }
 
-  useEffect(() => {
-    loadData();
+  // Fetch live price
+  const fetchLivePrice = useCallback(async () => {
+    try {
+      const data = await api.getLivePrice();
+      setLivePrice(data.price);
+      setLivePriceTime(data.timestamp);
+    } catch {
+      // silently ignore price fetch errors
+    }
   }, []);
+
+  // Initial load + auto-update if data is stale
+  useEffect(() => {
+    async function init() {
+      const latest = await loadData();
+      fetchLivePrice();
+
+      // Auto-update if data is stale (last candle older than 24h)
+      if (!autoUpdated.current) {
+        autoUpdated.current = true;
+        const staleThreshold = 24 * 60 * 60 * 1000; // 24 hours
+        if (!latest || Date.now() - latest.open_time > staleThreshold) {
+          setMessage('Data is outdated. Auto-updating...');
+          setUpdating(true);
+          try {
+            const candleResult = await api.updateData();
+            const signalResult = await api.generateSignals();
+            setMessage(
+              `Auto-updated: ${candleResult.inserted} candles, ${signalResult.generated} signals, ${signalResult.evaluated} evaluated.`
+            );
+            setLastDataUpdate(Date.now());
+            await loadData();
+          } catch (err) {
+            setMessage(err instanceof Error ? err.message : 'Auto-update failed');
+          } finally {
+            setUpdating(false);
+          }
+        }
+      }
+    }
+    init();
+  }, [loadData, fetchLivePrice]);
+
+  // Live price polling every 30 seconds
+  useEffect(() => {
+    const interval = setInterval(fetchLivePrice, 30_000);
+    return () => clearInterval(interval);
+  }, [fetchLivePrice]);
+
+  const priceChange = latestCandle && livePrice
+    ? ((livePrice - latestCandle.close) / latestCandle.close) * 100
+    : null;
 
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
-        <h2 className="text-xl font-semibold">Dashboard</h2>
+        <div>
+          <h2 className="text-xl font-semibold">Dashboard</h2>
+          {lastDataUpdate && (
+            <p className="text-xs text-gray-500 mt-0.5">
+              Last update: {timeAgo(lastDataUpdate)}
+            </p>
+          )}
+        </div>
         <button
           onClick={handleUpdate}
           disabled={updating}
@@ -88,8 +161,30 @@ export default function Dashboard() {
         <p className="text-gray-500">Loading...</p>
       ) : (
         <>
-          {/* Price card */}
+          {/* Price cards */}
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            {/* Live price card */}
+            <Card title="BTC Live Price">
+              {livePrice ? (
+                <>
+                  <p className="text-2xl font-bold">{formatUsd(livePrice)}</p>
+                  <div className="flex items-center gap-2 mt-1">
+                    {priceChange !== null && (
+                      <span className={`text-xs font-medium ${priceChange >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                        {priceChange >= 0 ? '+' : ''}{priceChange.toFixed(2)}% vs close
+                      </span>
+                    )}
+                    <span className="inline-block h-1.5 w-1.5 rounded-full bg-green-500 animate-pulse" />
+                    <span className="text-xs text-gray-500">
+                      {livePriceTime ? timeAgo(livePriceTime) : ''}
+                    </span>
+                  </div>
+                </>
+              ) : (
+                <p className="text-gray-500">Loading...</p>
+              )}
+            </Card>
+
             <Card title="BTC Daily Close">
               {latestCandle ? (
                 <>
@@ -122,28 +217,15 @@ export default function Dashboard() {
               )}
             </Card>
 
-            <Card title="Signals">
-              {stats ? (
-                <>
-                  <p className="text-2xl font-bold">{stats.total}</p>
-                  <p className="text-xs text-gray-500 mt-1">
-                    {stats.evaluated} evaluated · {stats.pending} pending
-                  </p>
-                </>
-              ) : (
-                <p className="text-gray-500">—</p>
-              )}
-            </Card>
-
             <Card title="Win Rate">
               {stats && stats.winRate !== null ? (
                 <>
                   <p className="text-2xl font-bold">{stats.winRate}%</p>
                   <p className="text-xs text-gray-500 mt-1">
-                    Avg: {formatPct(stats.avgReturn)}
+                    {stats.total} signals · {stats.evaluated} evaluated
                   </p>
                   <p className="text-xs text-gray-500">
-                    Best: {formatPct(stats.bestReturn)} · Worst: {formatPct(stats.worstReturn)}
+                    Avg: {formatPct(stats.avgReturn)} · Best: {formatPct(stats.bestReturn)}
                   </p>
                 </>
               ) : (
