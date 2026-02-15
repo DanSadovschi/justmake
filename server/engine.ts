@@ -14,6 +14,36 @@
 
 import { supabase } from './supabase.js';
 
+// ---------- Helpers ----------
+
+/** Paginated query — Supabase returns max 1000 rows by default. */
+async function fetchAllRows<T>(
+  table: string,
+  select: string,
+  orderCol: string,
+  ascending = true,
+): Promise<T[]> {
+  const PAGE = 1000;
+  const rows: T[] = [];
+  let from = 0;
+
+  while (true) {
+    const { data, error } = await supabase
+      .from(table)
+      .select(select)
+      .order(orderCol, { ascending })
+      .range(from, from + PAGE - 1);
+
+    if (error) throw new Error(error.message);
+    if (!data || data.length === 0) break;
+    rows.push(...(data as T[]));
+    if (data.length < PAGE) break;
+    from += PAGE;
+  }
+
+  return rows;
+}
+
 // ---------- EMA calculation ----------
 
 interface CandleRow {
@@ -207,18 +237,14 @@ export async function generateAndEvaluateSignals(): Promise<{
   generated: number;
   evaluated: number;
 }> {
-  // 1. Load all candles
-  const { data: candles, error: candleErr } = await supabase
-    .from('candles')
-    .select('*')
-    .order('open_time', { ascending: true });
+  // 1. Load all candles (paginated to avoid 1000-row limit)
+  const candles = await fetchAllRows<CandleRow>('candles', '*', 'open_time', true);
 
-  if (candleErr) throw new Error(candleErr.message);
-  if (!candles || candles.length < EMA_WARMUP + 2) {
+  if (candles.length < EMA_WARMUP + 2) {
     return { generated: 0, evaluated: 0 };
   }
 
-  const emaData = buildEmaData(candles as CandleRow[]);
+  const emaData = buildEmaData(candles);
 
   // 2. Load existing signal dates to avoid duplicates
   const { data: existingSignals, error: sigErr } = await supabase
@@ -248,7 +274,7 @@ export async function generateAndEvaluateSignals(): Promise<{
   // 5. Update entry_price for signals that were missing it
   //    (signal was on the latest candle at the time, now next-day exists)
   const timeToCandle = new Map<number, CandleRow>();
-  for (const c of candles as CandleRow[]) {
+  for (const c of candles) {
     timeToCandle.set(c.open_time, c);
   }
 
@@ -259,7 +285,7 @@ export async function generateAndEvaluateSignals(): Promise<{
   if (allSigErr) throw new Error(allSigErr.message);
 
   // Find candles sorted by time to get "next candle" lookup
-  const sortedTimes = (candles as CandleRow[]).map((c) => c.open_time);
+  const sortedTimes = candles.map((c) => c.open_time);
   const timeToNextOpen = new Map<number, number>();
   for (let i = 0; i < sortedTimes.length - 1; i++) {
     const nextCandle = timeToCandle.get(sortedTimes[i + 1]);

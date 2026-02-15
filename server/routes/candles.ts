@@ -4,18 +4,30 @@ import { fetchAllCandlesSince, fetchDailyCandles } from '../binance.js';
 
 export const candlesRouter = Router();
 
-// GET /api/candles — return all stored candles ordered by date
+// GET /api/candles — return all stored candles ordered by date (paginated)
 candlesRouter.get('/', async (_req, res) => {
-  const { data, error } = await supabase
-    .from('candles')
-    .select('*')
-    .order('open_time', { ascending: true });
+  const PAGE = 1000;
+  const all: unknown[] = [];
+  let from = 0;
 
-  if (error) {
-    res.status(500).json({ error: error.message });
-    return;
+  while (true) {
+    const { data, error } = await supabase
+      .from('candles')
+      .select('*')
+      .order('open_time', { ascending: true })
+      .range(from, from + PAGE - 1);
+
+    if (error) {
+      res.status(500).json({ error: error.message });
+      return;
+    }
+    if (!data || data.length === 0) break;
+    all.push(...data);
+    if (data.length < PAGE) break;
+    from += PAGE;
   }
-  res.json(data);
+
+  res.json(all);
 });
 
 // POST /api/candles/update — fetch new candles from Binance and upsert into DB
