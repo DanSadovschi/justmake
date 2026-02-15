@@ -161,18 +161,31 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
   try {
-    // 1. Load candles
-    const { data: candles, error: candleErr } = await supabase
-      .from('candles')
-      .select('*')
-      .order('open_time', { ascending: true });
+    // 1. Load candles (paginate — Supabase returns max 1000 rows by default)
+    const PAGE_SIZE = 1000;
+    const candles: CandleRow[] = [];
+    let from = 0;
 
-    if (candleErr) throw new Error(candleErr.message);
-    if (!candles || candles.length < EMA_WARMUP + 2) {
+    while (true) {
+      const { data, error: candleErr } = await supabase
+        .from('candles')
+        .select('*')
+        .order('open_time', { ascending: true })
+        .range(from, from + PAGE_SIZE - 1);
+
+      if (candleErr) throw new Error(candleErr.message);
+      if (!data || data.length === 0) break;
+
+      candles.push(...(data as CandleRow[]));
+      if (data.length < PAGE_SIZE) break;
+      from += PAGE_SIZE;
+    }
+
+    if (candles.length < EMA_WARMUP + 2) {
       return res.json({ generated: 0, evaluated: 0 });
     }
 
-    const emaData = buildEmaData(candles as CandleRow[]);
+    const emaData = buildEmaData(candles);
 
     // 2. Existing signal dates
     const { data: existingSignals, error: sigErr } = await supabase
@@ -193,9 +206,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
 
     // 4. Backfill entry prices
-    const sortedTimes = (candles as CandleRow[]).map((c) => c.open_time);
+    const sortedTimes = candles.map((c) => c.open_time);
     const timeToCandle = new Map<number, CandleRow>();
-    for (const c of candles as CandleRow[]) timeToCandle.set(c.open_time, c);
+    for (const c of candles) timeToCandle.set(c.open_time, c);
 
     const timeToNextOpen = new Map<number, number>();
     for (let i = 0; i < sortedTimes.length - 1; i++) {
