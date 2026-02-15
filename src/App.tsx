@@ -3,6 +3,7 @@ import Layout from './components/Layout';
 import Dashboard from './pages/Dashboard';
 import Chart from './pages/Chart';
 import Signals from './pages/Signals';
+import Intraday from './pages/Intraday';
 
 export default function App() {
   return (
@@ -12,6 +13,7 @@ export default function App() {
           <Route path="/" element={<Dashboard />} />
           <Route path="/chart" element={<Chart />} />
           <Route path="/signals" element={<Signals />} />
+          <Route path="/intraday" element={<Intraday />} />
         </Route>
       </Routes>
     </BrowserRouter>

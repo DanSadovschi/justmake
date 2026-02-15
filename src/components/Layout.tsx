@@ -32,6 +32,14 @@ export default function Layout() {
             >
               Signals
             </NavLink>
+            <NavLink
+              to="/intraday"
+              className={({ isActive }) =>
+                isActive ? 'text-amber-400 font-medium' : 'text-gray-400 hover:text-gray-200'
+              }
+            >
+              Intraday
+            </NavLink>
           </nav>
         </div>
       </header>
