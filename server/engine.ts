@@ -494,40 +494,43 @@ export async function generateAndEvaluateSignals(): Promise<{
     }
   }
 
-  // 6. Delete old evaluations without exit_reason (pre-smart-exit) so they get re-evaluated
-  const { data: oldEvals, error: oldEvalErr } = await supabase
+  // 6. Wipe ALL existing evaluations and re-evaluate from scratch
+  const { data: existingEvals, error: existEvalErr } = await supabase
     .from('evaluations')
-    .select('id')
-    .is('exit_reason', null);
+    .select('id, signal_id, exit_reason');
 
-  if (oldEvalErr) throw new Error(oldEvalErr.message);
-
-  if (oldEvals && oldEvals.length > 0) {
-    console.log(`[engine] deleting ${oldEvals.length} old evaluations without exit_reason`);
-    const { error: delErr } = await supabase
-      .from('evaluations')
-      .delete()
-      .is('exit_reason', null);
-    if (delErr) throw new Error(delErr.message);
+  if (existEvalErr) {
+    console.log(`[engine] error fetching existing evaluations: ${existEvalErr.message}`);
+  } else {
+    console.log(`[engine] found ${existingEvals?.length ?? 0} existing evaluations`);
+    if (existingEvals && existingEvals.length > 0) {
+      console.log(`[engine] sample eval: ${JSON.stringify(existingEvals[0])}`);
+      const { error: delErr } = await supabase
+        .from('evaluations')
+        .delete()
+        .neq('id', 0); // delete all rows
+      if (delErr) {
+        console.log(`[engine] error deleting evaluations: ${delErr.message}`);
+      } else {
+        console.log(`[engine] deleted all evaluations for fresh re-evaluation`);
+      }
+    }
   }
 
-  // 6b. Evaluate signals that haven't been evaluated yet
-  const { data: evaluatedIds, error: evalErr } = await supabase
-    .from('evaluations')
-    .select('signal_id');
-
-  if (evalErr) throw new Error(evalErr.message);
-
-  const evaluatedSet = new Set((evaluatedIds ?? []).map((e) => Number(e.signal_id)));
-
+  // 6b. Evaluate all signals with entry_price
   const { data: freshSignals, error: freshErr } = await supabase
     .from('signals')
     .select('id, signal_date, entry_price');
 
   if (freshErr) throw new Error(freshErr.message);
 
+  console.log(`[engine] freshSignals count: ${freshSignals?.length ?? 0}`);
+  if (freshSignals && freshSignals.length > 0) {
+    console.log(`[engine] sample signal: ${JSON.stringify(freshSignals[0])}`);
+  }
+
   const signalsToEval = (freshSignals ?? [])
-    .filter((s) => !evaluatedSet.has(Number(s.id)) && s.entry_price != null)
+    .filter((s) => s.entry_price != null)
     .map((s) => ({
       id: Number(s.id),
       signal_date: Number(s.signal_date),
@@ -537,7 +540,7 @@ export async function generateAndEvaluateSignals(): Promise<{
   console.log(`[engine] ${candles.length} candles, ${signalsToEval.length} signals to evaluate`);
   if (signalsToEval.length > 0) {
     const sample = signalsToEval[0];
-    console.log(`[engine] sample signal: id=${sample.id} date=${sample.signal_date} entry=${sample.entry_price}`);
+    console.log(`[engine] sample signal to eval: id=${sample.id} date=${sample.signal_date} entry=${sample.entry_price}`);
   }
 
   // 6b. Backfill indicators for existing signals missing confidence

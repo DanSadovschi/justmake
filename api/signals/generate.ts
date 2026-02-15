@@ -414,27 +414,20 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       }
     }
 
-    // Delete old evaluations without exit_reason (pre-smart-exit)
+    // Wipe ALL existing evaluations and re-evaluate from scratch
     await supabase
       .from('evaluations')
       .delete()
-      .is('exit_reason', null);
+      .neq('id', 0);
 
-    // Evaluate
-    const { data: evaluatedIds, error: evalErr } = await supabase
-      .from('evaluations')
-      .select('signal_id');
-    if (evalErr) throw new Error(evalErr.message);
-
-    const evaluatedSet = new Set((evaluatedIds ?? []).map((e) => Number(e.signal_id)));
-
+    // Evaluate all signals with entry_price
     const { data: freshSignals, error: freshErr } = await supabase
       .from('signals')
       .select('id, signal_date, entry_price');
     if (freshErr) throw new Error(freshErr.message);
 
     const signalsToEval = (freshSignals ?? [])
-      .filter((s) => !evaluatedSet.has(Number(s.id)) && s.entry_price != null)
+      .filter((s) => s.entry_price != null)
       .map((s) => ({
         id: Number(s.id),
         signal_date: Number(s.signal_date),
