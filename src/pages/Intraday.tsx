@@ -85,7 +85,7 @@ interface FormConfig {
 }
 
 const defaultForm: FormConfig = {
-  ltfInterval: '1h',
+  ltfInterval: '15m',
   htfInterval: '4h',
   marketType: 'spot',
   lookbackDays: 730,
@@ -198,6 +198,8 @@ function ConfigForm({
           <span className="text-gray-400">LTF Interval</span>
           <select value={form.ltfInterval} onChange={e => upd('ltfInterval', e.target.value)}
             className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-gray-100">
+            <option value="5m">5M (Binance)</option>
+            <option value="15m">15M (Binance)</option>
             <option value="1h">1H</option>
           </select>
         </label>
@@ -205,6 +207,7 @@ function ConfigForm({
           <span className="text-gray-400">HTF Interval</span>
           <select value={form.htfInterval} onChange={e => upd('htfInterval', e.target.value)}
             className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-gray-100">
+            <option value="1h">1H</option>
             <option value="4h">4H</option>
           </select>
         </label>
