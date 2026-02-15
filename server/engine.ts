@@ -315,18 +315,37 @@ function evaluateSignals(
     timeToIdx.set(data[i].open_time, i);
   }
 
+  console.log(`[eval] timeToIdx size: ${timeToIdx.size}, data.length: ${data.length}`);
+  if (data.length > 0) {
+    console.log(`[eval] first candle time: ${data[0].open_time}, last: ${data[data.length - 1].open_time}`);
+  }
+
   const results: EvalResult[] = [];
 
   for (const sig of signalsToEval) {
-    if (sig.entry_price == null) continue;
+    if (sig.entry_price == null) {
+      console.log(`[eval] sig ${sig.id}: SKIP — entry_price is null`);
+      continue;
+    }
 
     const sigIdx = timeToIdx.get(sig.signal_date);
-    if (sigIdx === undefined) continue;
+    if (sigIdx === undefined) {
+      console.log(`[eval] sig ${sig.id}: SKIP — signal_date ${sig.signal_date} not found in timeToIdx (type: ${typeof sig.signal_date})`);
+      // Log a few keys for comparison
+      const keys = Array.from(timeToIdx.keys()).slice(0, 3);
+      console.log(`[eval]   timeToIdx sample keys: ${keys.join(', ')} (type: ${typeof keys[0]})`);
+      continue;
+    }
 
     const entryIdx = sigIdx + 1;
     const entryPrice = sig.entry_price;
 
-    if (entryIdx + 1 >= data.length) continue;
+    if (entryIdx + 1 >= data.length) {
+      console.log(`[eval] sig ${sig.id}: SKIP — entryIdx+1 (${entryIdx + 1}) >= data.length (${data.length})`);
+      continue;
+    }
+
+    console.log(`[eval] sig ${sig.id}: evaluating, sigIdx=${sigIdx}, entryIdx=${entryIdx}, entryPrice=${entryPrice}`);
 
     const slPrice = entryPrice * (1 + SL_PCT / 100);
     const tpPrice = entryPrice * (1 + TP_PCT / 100);
