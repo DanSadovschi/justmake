@@ -31,10 +31,24 @@ CREATE TABLE IF NOT EXISTS evaluations (
   id                SERIAL PRIMARY KEY,
   signal_id         INTEGER NOT NULL UNIQUE REFERENCES signals (id),
   entry_price       DOUBLE PRECISION NOT NULL,
-  exit_price        DOUBLE PRECISION NOT NULL,  -- close at horizon candle
-  exit_date         BIGINT NOT NULL,            -- open_time of horizon candle
+  exit_price        DOUBLE PRECISION NOT NULL,  -- close at exit candle
+  exit_date         BIGINT NOT NULL,            -- open_time of exit candle
   return_pct        DOUBLE PRECISION NOT NULL,  -- (exit - entry) / entry * 100
   max_adverse_pct   DOUBLE PRECISION NOT NULL,  -- worst drawdown from entry (daily lows)
   max_favorable_pct DOUBLE PRECISION NOT NULL,  -- best run-up from entry (daily highs)
+  exit_reason       TEXT,                       -- stop_loss | take_profit | trailing_stop | death_cross | timeout
+  hold_days         INTEGER,                    -- number of days position was held
   evaluated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Migration: add new columns to existing evaluations table
+-- (safe to run multiple times thanks to IF NOT EXISTS pattern)
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='evaluations' AND column_name='exit_reason') THEN
+    ALTER TABLE evaluations ADD COLUMN exit_reason TEXT;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='evaluations' AND column_name='hold_days') THEN
+    ALTER TABLE evaluations ADD COLUMN hold_days INTEGER;
+  END IF;
+END $$;

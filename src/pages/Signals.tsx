@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { api, type Signal } from '../lib/api';
+import { api, type Signal, type ExitReason } from '../lib/api';
 
 function formatDate(ms: number) {
   return new Date(ms).toISOString().slice(0, 10);
@@ -12,6 +12,14 @@ function formatUsd(n: number) {
 function formatPct(n: number) {
   return `${n >= 0 ? '+' : ''}${n.toFixed(2)}%`;
 }
+
+const EXIT_LABELS: Record<ExitReason, { label: string; color: string }> = {
+  stop_loss:     { label: 'Stop Loss',     color: 'text-red-400 bg-red-900/30' },
+  take_profit:   { label: 'Take Profit',   color: 'text-green-400 bg-green-900/30' },
+  trailing_stop: { label: 'Trailing Stop', color: 'text-amber-400 bg-amber-900/30' },
+  death_cross:   { label: 'Death Cross',   color: 'text-purple-400 bg-purple-900/30' },
+  timeout:       { label: 'Timeout',       color: 'text-gray-400 bg-gray-800' },
+};
 
 type StatusFilter = 'all' | 'evaluated' | 'pending';
 
@@ -63,18 +71,19 @@ export default function Signals() {
                 <th className="px-3 py-2">Date</th>
                 <th className="px-3 py-2">Direction</th>
                 <th className="px-3 py-2">Entry</th>
-                <th className="px-3 py-2">EMA20</th>
-                <th className="px-3 py-2">EMA50</th>
-                <th className="px-3 py-2">Status</th>
+                <th className="px-3 py-2">Exit</th>
                 <th className="px-3 py-2">Return</th>
-                <th className="px-3 py-2">Max Drawdown</th>
-                <th className="px-3 py-2">Max Run-up</th>
+                <th className="px-3 py-2">Exit Reason</th>
+                <th className="px-3 py-2">Hold</th>
+                <th className="px-3 py-2">Drawdown</th>
+                <th className="px-3 py-2">Run-up</th>
                 <th className="px-3 py-2">Exit Date</th>
               </tr>
             </thead>
             <tbody>
               {filtered.map((s) => {
                 const ev = s.evaluations.length > 0 ? s.evaluations[0] : null;
+                const exitInfo = ev?.exit_reason ? EXIT_LABELS[ev.exit_reason] : null;
                 return (
                   <tr key={s.id} className="border-b border-gray-800/50 hover:bg-gray-900/50">
                     <td className="px-3 py-2 whitespace-nowrap">{formatDate(s.signal_date)}</td>
@@ -86,21 +95,27 @@ export default function Signals() {
                     <td className="px-3 py-2">
                       {s.entry_price ? formatUsd(s.entry_price) : '—'}
                     </td>
-                    <td className="px-3 py-2 text-gray-400">{s.ema20.toFixed(0)}</td>
-                    <td className="px-3 py-2 text-gray-400">{s.ema50.toFixed(0)}</td>
                     <td className="px-3 py-2">
-                      {ev ? (
-                        <span className="text-xs text-blue-400">Evaluated</span>
-                      ) : (
-                        <span className="text-xs text-yellow-400">Pending</span>
-                      )}
+                      {ev ? formatUsd(ev.exit_price) : '—'}
                     </td>
                     <td className="px-3 py-2">
                       {ev ? (
-                        <span className={ev.return_pct >= 0 ? 'text-green-400' : 'text-red-400'}>
+                        <span className={`font-medium ${ev.return_pct >= 0 ? 'text-green-400' : 'text-red-400'}`}>
                           {formatPct(ev.return_pct)}
                         </span>
+                      ) : (
+                        <span className="text-yellow-400 text-xs">Pending</span>
+                      )}
+                    </td>
+                    <td className="px-3 py-2">
+                      {exitInfo ? (
+                        <span className={`rounded px-2 py-0.5 text-xs ${exitInfo.color}`}>
+                          {exitInfo.label}
+                        </span>
                       ) : '—'}
+                    </td>
+                    <td className="px-3 py-2 text-gray-400">
+                      {ev?.hold_days != null ? `${ev.hold_days}d` : '—'}
                     </td>
                     <td className="px-3 py-2">
                       {ev ? (

@@ -1,15 +1,17 @@
 /**
  * Signal engine — EMA crossover strategy on daily BTC closes.
  *
- * Rules:
- *   - Compute EMA(20) and EMA(50) on daily close prices.
- *   - LONG signal when:
- *       1. Previous candle: EMA20 <= EMA50
- *       2. Current candle:  EMA20 > EMA50
- *       3. Current close > EMA50
- *   - Entry price: next-day open (set when available).
- *   - Evaluation horizon: 14 calendar days (14 candles).
- *   - One signal per crossover: no new LONG while a prior signal's horizon is still open.
+ * Entry rules:
+ *   - EMA(20) crosses above EMA(50)
+ *   - Close > EMA(50)
+ *   - Entry at next-day open
+ *
+ * Exit rules (checked daily, first match wins):
+ *   1. Stop Loss:    close <= entry * 0.95  (-5%)
+ *   2. Take Profit:  close >= entry * 1.15  (+15%)
+ *   3. Trailing Stop: once +8% reached, exit if close drops 3% from peak close
+ *   4. Death Cross:  EMA20 crosses below EMA50
+ *   5. Timeout:      30 days max hold
  */
 
 import { supabase } from './supabase.js';
@@ -94,10 +96,19 @@ function buildEmaData(candles: CandleRow[]): EmaPoint[] {
   }));
 }
 
-// ---------- Signal detection ----------
+// ---------- Constants ----------
 
-const HORIZON_DAYS = 14;
-const EMA_WARMUP = 50; // Skip first 50 candles for EMA stability
+const SL_PCT = -5;         // Stop Loss at -5%
+const TP_PCT = 15;         // Take Profit at +15%
+const TRAIL_ACTIVATE = 8;  // Trailing stop activates at +8%
+const TRAIL_DROP = 3;      // Trailing stop triggers on 3% drop from peak
+const MAX_HOLD_DAYS = 30;  // Maximum hold period
+const COOLDOWN_DAYS = 30;  // Minimum gap between signals
+const EMA_WARMUP = 50;     // Skip first 50 candles for EMA stability
+
+type ExitReason = 'stop_loss' | 'take_profit' | 'trailing_stop' | 'death_cross' | 'timeout';
+
+// ---------- Signal detection ----------
 
 interface NewSignal {
   signal_date: number;
@@ -116,11 +127,14 @@ function detectSignals(emaData: EmaPoint[], existingSignalDates: Set<number>): N
     const prev = emaData[i - 1];
     const curr = emaData[i];
 
-    // Skip if we already have a signal for this date
-    if (existingSignalDates.has(curr.open_time)) continue;
+    // Track cooldown for existing signals too (fix: was skipping without updating)
+    if (existingSignalDates.has(curr.open_time)) {
+      lastSignalIdx = i;
+      continue;
+    }
 
-    // Skip if we're still within the horizon of a previous signal
-    if (i - lastSignalIdx <= HORIZON_DAYS) continue;
+    // Skip if we're still within the cooldown of a previous signal
+    if (i - lastSignalIdx <= COOLDOWN_DAYS) continue;
 
     // Check crossover conditions
     const prevEma20BelowOrEqual = prev.ema20 <= prev.ema50;
@@ -128,7 +142,6 @@ function detectSignals(emaData: EmaPoint[], existingSignalDates: Set<number>): N
     const closeAboveEma50 = curr.close > curr.ema50;
 
     if (prevEma20BelowOrEqual && currEma20Above && closeAboveEma50) {
-      // Entry price = next-day open (if available)
       const nextCandle = i + 1 < emaData.length ? emaData[i + 1] : null;
 
       signals.push({
@@ -155,7 +168,7 @@ function detectSignals(emaData: EmaPoint[], existingSignalDates: Set<number>): N
   return signals;
 }
 
-// ---------- Evaluation ----------
+// ---------- Smart Evaluation ----------
 
 interface SignalRow {
   id: number;
@@ -171,13 +184,14 @@ interface EvalResult {
   return_pct: number;
   max_adverse_pct: number;
   max_favorable_pct: number;
+  exit_reason: ExitReason;
+  hold_days: number;
 }
 
 function evaluateSignals(
   signalsToEval: SignalRow[],
   emaData: EmaPoint[],
 ): EvalResult[] {
-  // Build a map from open_time to index for fast lookup
   const timeToIdx = new Map<number, number>();
   for (let i = 0; i < emaData.length; i++) {
     timeToIdx.set(emaData[i].open_time, i);
@@ -191,31 +205,86 @@ function evaluateSignals(
     const sigIdx = timeToIdx.get(sig.signal_date);
     if (sigIdx === undefined) continue;
 
-    // Entry is at next-day open, so horizon starts at sigIdx + 1
     const entryIdx = sigIdx + 1;
-    const exitIdx = entryIdx + HORIZON_DAYS;
-
-    // Need at least exitIdx candles
-    if (exitIdx >= emaData.length) continue;
-
     const entryPrice = sig.entry_price;
-    const exitCandle = emaData[exitIdx];
-    const exitPrice = exitCandle.close;
-    const returnPct = ((exitPrice - entryPrice) / entryPrice) * 100;
 
-    // Compute max adverse and favorable during horizon (entry candle through exit candle)
+    // Need at least a few candles after entry
+    if (entryIdx + 1 >= emaData.length) continue;
+
+    const slPrice = entryPrice * (1 + SL_PCT / 100);
+    const tpPrice = entryPrice * (1 + TP_PCT / 100);
+    const trailActivatePrice = entryPrice * (1 + TRAIL_ACTIVATE / 100);
+
+    let exitReason: ExitReason | null = null;
+    let exitIdx = -1;
+    let peakClose = entryPrice;
+    let trailActive = false;
     let maxAdverse = 0;
     let maxFavorable = 0;
 
-    for (let j = entryIdx; j <= exitIdx; j++) {
-      const low = emaData[j].low;
-      const high = emaData[j].high;
-      const adversePct = ((low - entryPrice) / entryPrice) * 100;
-      const favorablePct = ((high - entryPrice) / entryPrice) * 100;
+    const maxIdx = Math.min(entryIdx + MAX_HOLD_DAYS, emaData.length - 1);
 
-      if (adversePct < maxAdverse) maxAdverse = adversePct;
-      if (favorablePct > maxFavorable) maxFavorable = favorablePct;
+    for (let j = entryIdx; j <= maxIdx; j++) {
+      const candle = emaData[j];
+
+      // Track max adverse / favorable
+      const advPct = ((candle.low - entryPrice) / entryPrice) * 100;
+      const favPct = ((candle.high - entryPrice) / entryPrice) * 100;
+      if (advPct < maxAdverse) maxAdverse = advPct;
+      if (favPct > maxFavorable) maxFavorable = favPct;
+
+      // Track peak close for trailing stop
+      if (candle.close > peakClose) peakClose = candle.close;
+
+      // 1. Stop Loss — close dropped to SL level
+      if (candle.close <= slPrice) {
+        exitReason = 'stop_loss';
+        exitIdx = j;
+        break;
+      }
+
+      // 2. Take Profit — close reached TP level
+      if (candle.close >= tpPrice) {
+        exitReason = 'take_profit';
+        exitIdx = j;
+        break;
+      }
+
+      // 3. Trailing Stop — activate once +8%, trigger on 3% drop from peak
+      if (!trailActive && candle.close >= trailActivatePrice) {
+        trailActive = true;
+      }
+      if (trailActive) {
+        const dropFromPeak = ((peakClose - candle.close) / peakClose) * 100;
+        if (dropFromPeak >= TRAIL_DROP) {
+          exitReason = 'trailing_stop';
+          exitIdx = j;
+          break;
+        }
+      }
+
+      // 4. Death Cross — EMA20 crosses below EMA50 (skip entry day)
+      if (j > entryIdx) {
+        const prevDay = emaData[j - 1];
+        if (prevDay.ema20 >= prevDay.ema50 && candle.ema20 < candle.ema50) {
+          exitReason = 'death_cross';
+          exitIdx = j;
+          break;
+        }
+      }
     }
+
+    // 5. Timeout — reached max hold days without any other exit
+    if (exitReason === null) {
+      if (maxIdx >= emaData.length) continue; // not enough data yet
+      exitReason = 'timeout';
+      exitIdx = maxIdx;
+    }
+
+    const exitCandle = emaData[exitIdx];
+    const exitPrice = exitCandle.close;
+    const returnPct = ((exitPrice - entryPrice) / entryPrice) * 100;
+    const holdDays = exitIdx - entryIdx;
 
     results.push({
       signal_id: sig.id,
@@ -225,6 +294,8 @@ function evaluateSignals(
       return_pct: Math.round(returnPct * 100) / 100,
       max_adverse_pct: Math.round(maxAdverse * 100) / 100,
       max_favorable_pct: Math.round(maxFavorable * 100) / 100,
+      exit_reason: exitReason,
+      hold_days: holdDays,
     });
   }
 
@@ -272,7 +343,6 @@ export async function generateAndEvaluateSignals(): Promise<{
   }
 
   // 5. Update entry_price for signals that were missing it
-  //    (signal was on the latest candle at the time, now next-day exists)
   const timeToCandle = new Map<number, CandleRow>();
   for (const c of candles) {
     timeToCandle.set(c.open_time, c);
@@ -284,7 +354,6 @@ export async function generateAndEvaluateSignals(): Promise<{
 
   if (allSigErr) throw new Error(allSigErr.message);
 
-  // Find candles sorted by time to get "next candle" lookup
   const sortedTimes = candles.map((c) => c.open_time);
   const timeToNextOpen = new Map<number, number>();
   for (let i = 0; i < sortedTimes.length - 1; i++) {
@@ -315,7 +384,6 @@ export async function generateAndEvaluateSignals(): Promise<{
 
   const evaluatedSet = new Set((evaluatedIds ?? []).map((e) => e.signal_id));
 
-  // Reload signals with updated entry_prices
   const { data: freshSignals, error: freshErr } = await supabase
     .from('signals')
     .select('id, signal_date, entry_price');

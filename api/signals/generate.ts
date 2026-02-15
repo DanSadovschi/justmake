@@ -27,6 +27,18 @@ interface EmaPoint {
   ema50: number;
 }
 
+// ---------- Constants ----------
+
+const SL_PCT = -5;
+const TP_PCT = 15;
+const TRAIL_ACTIVATE = 8;
+const TRAIL_DROP = 3;
+const MAX_HOLD_DAYS = 30;
+const COOLDOWN_DAYS = 30;
+const EMA_WARMUP = 50;
+
+type ExitReason = 'stop_loss' | 'take_profit' | 'trailing_stop' | 'death_cross' | 'timeout';
+
 // ---------- EMA ----------
 
 function computeEma(candles: CandleRow[], period: number): number[] {
@@ -54,9 +66,6 @@ function buildEmaData(candles: CandleRow[]): EmaPoint[] {
 
 // ---------- Signal detection ----------
 
-const HORIZON_DAYS = 14;
-const EMA_WARMUP = 50;
-
 interface NewSignal {
   signal_date: number;
   direction: 'LONG';
@@ -74,8 +83,11 @@ function detectSignals(emaData: EmaPoint[], existingDates: Set<number>): NewSign
     const prev = emaData[i - 1];
     const curr = emaData[i];
 
-    if (existingDates.has(curr.open_time)) continue;
-    if (i - lastSignalIdx <= HORIZON_DAYS) continue;
+    if (existingDates.has(curr.open_time)) {
+      lastSignalIdx = i;
+      continue;
+    }
+    if (i - lastSignalIdx <= COOLDOWN_DAYS) continue;
 
     if (prev.ema20 <= prev.ema50 && curr.ema20 > curr.ema50 && curr.close > curr.ema50) {
       const nextCandle = i + 1 < emaData.length ? emaData[i + 1] : null;
@@ -101,7 +113,7 @@ function detectSignals(emaData: EmaPoint[], existingDates: Set<number>): NewSign
   return signals;
 }
 
-// ---------- Evaluation ----------
+// ---------- Smart Evaluation ----------
 
 interface EvalResult {
   signal_id: number;
@@ -111,6 +123,8 @@ interface EvalResult {
   return_pct: number;
   max_adverse_pct: number;
   max_favorable_pct: number;
+  exit_reason: ExitReason;
+  hold_days: number;
 }
 
 function evaluateSignals(
@@ -126,21 +140,55 @@ function evaluateSignals(
     if (sigIdx === undefined) continue;
 
     const entryIdx = sigIdx + 1;
-    const exitIdx = entryIdx + HORIZON_DAYS;
-    if (exitIdx >= emaData.length) continue;
-
     const entryPrice = sig.entry_price;
-    const exitCandle = emaData[exitIdx];
-    const returnPct = ((exitCandle.close - entryPrice) / entryPrice) * 100;
+    if (entryIdx + 1 >= emaData.length) continue;
 
+    const slPrice = entryPrice * (1 + SL_PCT / 100);
+    const tpPrice = entryPrice * (1 + TP_PCT / 100);
+    const trailActivatePrice = entryPrice * (1 + TRAIL_ACTIVATE / 100);
+
+    let exitReason: ExitReason | null = null;
+    let exitIdx = -1;
+    let peakClose = entryPrice;
+    let trailActive = false;
     let maxAdverse = 0;
     let maxFavorable = 0;
-    for (let j = entryIdx; j <= exitIdx; j++) {
-      const adv = ((emaData[j].low - entryPrice) / entryPrice) * 100;
-      const fav = ((emaData[j].high - entryPrice) / entryPrice) * 100;
-      if (adv < maxAdverse) maxAdverse = adv;
-      if (fav > maxFavorable) maxFavorable = fav;
+
+    const maxIdx = Math.min(entryIdx + MAX_HOLD_DAYS, emaData.length - 1);
+
+    for (let j = entryIdx; j <= maxIdx; j++) {
+      const candle = emaData[j];
+      const advPct = ((candle.low - entryPrice) / entryPrice) * 100;
+      const favPct = ((candle.high - entryPrice) / entryPrice) * 100;
+      if (advPct < maxAdverse) maxAdverse = advPct;
+      if (favPct > maxFavorable) maxFavorable = favPct;
+      if (candle.close > peakClose) peakClose = candle.close;
+
+      if (candle.close <= slPrice) { exitReason = 'stop_loss'; exitIdx = j; break; }
+      if (candle.close >= tpPrice) { exitReason = 'take_profit'; exitIdx = j; break; }
+
+      if (!trailActive && candle.close >= trailActivatePrice) trailActive = true;
+      if (trailActive) {
+        const dropFromPeak = ((peakClose - candle.close) / peakClose) * 100;
+        if (dropFromPeak >= TRAIL_DROP) { exitReason = 'trailing_stop'; exitIdx = j; break; }
+      }
+
+      if (j > entryIdx) {
+        const prevDay = emaData[j - 1];
+        if (prevDay.ema20 >= prevDay.ema50 && candle.ema20 < candle.ema50) {
+          exitReason = 'death_cross'; exitIdx = j; break;
+        }
+      }
     }
+
+    if (exitReason === null) {
+      if (maxIdx >= emaData.length) continue;
+      exitReason = 'timeout';
+      exitIdx = maxIdx;
+    }
+
+    const exitCandle = emaData[exitIdx];
+    const returnPct = ((exitCandle.close - entryPrice) / entryPrice) * 100;
 
     results.push({
       signal_id: sig.id,
@@ -150,6 +198,8 @@ function evaluateSignals(
       return_pct: Math.round(returnPct * 100) / 100,
       max_adverse_pct: Math.round(maxAdverse * 100) / 100,
       max_favorable_pct: Math.round(maxFavorable * 100) / 100,
+      exit_reason: exitReason,
+      hold_days: exitIdx - entryIdx,
     });
   }
   return results;
@@ -161,7 +211,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
   try {
-    // 1. Load candles (paginate — Supabase returns max 1000 rows by default)
     const PAGE_SIZE = 1000;
     const candles: CandleRow[] = [];
     let from = 0;
@@ -175,7 +224,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
       if (candleErr) throw new Error(candleErr.message);
       if (!data || data.length === 0) break;
-
       candles.push(...(data as CandleRow[]));
       if (data.length < PAGE_SIZE) break;
       from += PAGE_SIZE;
@@ -187,15 +235,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     const emaData = buildEmaData(candles);
 
-    // 2. Existing signal dates
     const { data: existingSignals, error: sigErr } = await supabase
       .from('signals')
       .select('id, signal_date, entry_price');
     if (sigErr) throw new Error(sigErr.message);
 
     const existingDates = new Set((existingSignals ?? []).map((s) => s.signal_date as number));
-
-    // 3. Detect new signals
     const newSignals = detectSignals(emaData, existingDates);
 
     if (newSignals.length > 0) {
@@ -205,7 +250,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       if (insertErr) throw new Error(insertErr.message);
     }
 
-    // 4. Backfill entry prices
+    // Backfill entry prices
     const sortedTimes = candles.map((c) => c.open_time);
     const timeToCandle = new Map<number, CandleRow>();
     for (const c of candles) timeToCandle.set(c.open_time, c);
@@ -230,7 +275,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       }
     }
 
-    // 5. Evaluate
+    // Evaluate
     const { data: evaluatedIds, error: evalErr } = await supabase
       .from('evaluations')
       .select('signal_id');

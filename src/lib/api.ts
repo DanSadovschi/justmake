@@ -30,6 +30,8 @@ export interface Signal {
   evaluations: Evaluation[];
 }
 
+export type ExitReason = 'stop_loss' | 'take_profit' | 'trailing_stop' | 'death_cross' | 'timeout';
+
 export interface Evaluation {
   id: number;
   signal_id: number;
@@ -39,6 +41,8 @@ export interface Evaluation {
   return_pct: number;
   max_adverse_pct: number;
   max_favorable_pct: number;
+  exit_reason: ExitReason | null;
+  hold_days: number | null;
 }
 
 export interface Stats {
