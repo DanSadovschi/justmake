@@ -309,7 +309,16 @@ export async function generateAndEvaluateSignals(): Promise<{
   evaluated: number;
 }> {
   // 1. Load all candles (paginated to avoid 1000-row limit)
-  const candles = await fetchAllRows<CandleRow>('candles', '*', 'open_time', true);
+  // Coerce all numeric fields — Supabase returns BIGINT as strings
+  const rawCandles = await fetchAllRows<Record<string, unknown>>('candles', '*', 'open_time', true);
+  const candles: CandleRow[] = rawCandles.map((c) => ({
+    open_time: Number(c.open_time),
+    open: Number(c.open),
+    high: Number(c.high),
+    low: Number(c.low),
+    close: Number(c.close),
+    volume: Number(c.volume),
+  }));
 
   if (candles.length < EMA_WARMUP + 2) {
     return { generated: 0, evaluated: 0 };
@@ -324,7 +333,7 @@ export async function generateAndEvaluateSignals(): Promise<{
 
   if (sigErr) throw new Error(sigErr.message);
 
-  const existingDates = new Set((existingSignals ?? []).map((s) => s.signal_date));
+  const existingDates = new Set((existingSignals ?? []).map((s) => Number(s.signal_date)));
 
   // 3. Detect new signals
   const newSignals = detectSignals(emaData, existingDates);
@@ -365,7 +374,7 @@ export async function generateAndEvaluateSignals(): Promise<{
 
   for (const sig of allSignals ?? []) {
     if (sig.entry_price == null) {
-      const nextOpen = timeToNextOpen.get(sig.signal_date);
+      const nextOpen = timeToNextOpen.get(Number(sig.signal_date));
       if (nextOpen !== undefined) {
         await supabase
           .from('signals')
@@ -382,7 +391,7 @@ export async function generateAndEvaluateSignals(): Promise<{
 
   if (evalErr) throw new Error(evalErr.message);
 
-  const evaluatedSet = new Set((evaluatedIds ?? []).map((e) => e.signal_id));
+  const evaluatedSet = new Set((evaluatedIds ?? []).map((e) => Number(e.signal_id)));
 
   const { data: freshSignals, error: freshErr } = await supabase
     .from('signals')
@@ -391,9 +400,21 @@ export async function generateAndEvaluateSignals(): Promise<{
   if (freshErr) throw new Error(freshErr.message);
 
   const signalsToEval = (freshSignals ?? [])
-    .filter((s) => !evaluatedSet.has(s.id) && s.entry_price != null) as SignalRow[];
+    .filter((s) => !evaluatedSet.has(Number(s.id)) && s.entry_price != null)
+    .map((s) => ({
+      id: Number(s.id),
+      signal_date: Number(s.signal_date),
+      entry_price: Number(s.entry_price),
+    })) as SignalRow[];
+
+  console.log(`[engine] ${candles.length} candles, ${signalsToEval.length} signals to evaluate`);
+  if (signalsToEval.length > 0) {
+    const sample = signalsToEval[0];
+    console.log(`[engine] sample signal: id=${sample.id} date=${sample.signal_date} entry=${sample.entry_price}`);
+  }
 
   const evalResults = evaluateSignals(signalsToEval, emaData);
+  console.log(`[engine] evaluation results: ${evalResults.length}`);
 
   if (evalResults.length > 0) {
     const { error: evalInsertErr } = await supabase

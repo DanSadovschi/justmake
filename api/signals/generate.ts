@@ -224,7 +224,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
       if (candleErr) throw new Error(candleErr.message);
       if (!data || data.length === 0) break;
-      candles.push(...(data as CandleRow[]));
+      // Coerce BIGINT fields — Supabase may return them as strings
+      candles.push(...data.map((c) => ({
+        open_time: Number(c.open_time),
+        open: Number(c.open),
+        high: Number(c.high),
+        low: Number(c.low),
+        close: Number(c.close),
+        volume: Number(c.volume),
+      })));
       if (data.length < PAGE_SIZE) break;
       from += PAGE_SIZE;
     }
@@ -240,7 +248,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       .select('id, signal_date, entry_price');
     if (sigErr) throw new Error(sigErr.message);
 
-    const existingDates = new Set((existingSignals ?? []).map((s) => s.signal_date as number));
+    const existingDates = new Set((existingSignals ?? []).map((s) => Number(s.signal_date)));
     const newSignals = detectSignals(emaData, existingDates);
 
     if (newSignals.length > 0) {
@@ -268,7 +276,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     for (const sig of allSignals ?? []) {
       if (sig.entry_price == null) {
-        const nextOpen = timeToNextOpen.get(sig.signal_date as number);
+        const nextOpen = timeToNextOpen.get(Number(sig.signal_date));
         if (nextOpen !== undefined) {
           await supabase.from('signals').update({ entry_price: nextOpen }).eq('id', sig.id);
         }
@@ -281,7 +289,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       .select('signal_id');
     if (evalErr) throw new Error(evalErr.message);
 
-    const evaluatedSet = new Set((evaluatedIds ?? []).map((e) => e.signal_id as number));
+    const evaluatedSet = new Set((evaluatedIds ?? []).map((e) => Number(e.signal_id)));
 
     const { data: freshSignals, error: freshErr } = await supabase
       .from('signals')
@@ -289,9 +297,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     if (freshErr) throw new Error(freshErr.message);
 
     const signalsToEval = (freshSignals ?? [])
-      .filter((s) => !evaluatedSet.has(s.id as number) && s.entry_price != null) as {
-        id: number; signal_date: number; entry_price: number;
-      }[];
+      .filter((s) => !evaluatedSet.has(Number(s.id)) && s.entry_price != null)
+      .map((s) => ({
+        id: Number(s.id),
+        signal_date: Number(s.signal_date),
+        entry_price: Number(s.entry_price),
+      }));
 
     const evalResults = evaluateSignals(signalsToEval, emaData);
 
