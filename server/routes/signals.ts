@@ -6,37 +6,48 @@ export const signalsRouter = Router();
 
 // GET /api/signals — return all signals with their evaluations
 signalsRouter.get('/', async (_req, res) => {
-  const { data, error } = await supabase
-    .from('signals')
-    .select('*, evaluations(*)')
-    .order('signal_date', { ascending: false });
+  const [sigRes, evalRes] = await Promise.all([
+    supabase.from('signals').select('*').order('signal_date', { ascending: false }),
+    supabase.from('evaluations').select('*'),
+  ]);
 
-  if (error) {
-    res.status(500).json({ error: error.message });
-    return;
+  if (sigRes.error) { res.status(500).json({ error: sigRes.error.message }); return; }
+  if (evalRes.error) { res.status(500).json({ error: evalRes.error.message }); return; }
+
+  const evalMap = new Map<number, typeof evalRes.data>();
+  for (const ev of evalRes.data ?? []) {
+    const sid = Number(ev.signal_id);
+    if (!evalMap.has(sid)) evalMap.set(sid, []);
+    evalMap.get(sid)!.push(ev);
   }
-  res.json(data);
+
+  const merged = (sigRes.data ?? []).map((s) => ({
+    ...s,
+    evaluations: evalMap.get(Number(s.id)) ?? [],
+  }));
+
+  res.json(merged);
 });
 
 // GET /api/signals/stats — summary statistics
 signalsRouter.get('/stats', async (_req, res) => {
-  const { data: signals, error } = await supabase
-    .from('signals')
-    .select('*, evaluations(*)');
+  const [sigRes, evalRes] = await Promise.all([
+    supabase.from('signals').select('*'),
+    supabase.from('evaluations').select('*'),
+  ]);
 
-  if (error) {
-    res.status(500).json({ error: error.message });
-    return;
-  }
+  if (sigRes.error) { res.status(500).json({ error: sigRes.error.message }); return; }
+  if (evalRes.error) { res.status(500).json({ error: evalRes.error.message }); return; }
 
-  const total = signals?.length ?? 0;
-  const evaluated = signals?.filter(
-    (s) => Array.isArray(s.evaluations) && s.evaluations.length > 0
-  ) ?? [];
+  const evalMap = new Map<number, (typeof evalRes.data)[number]>();
+  for (const ev of evalRes.data ?? []) evalMap.set(Number(ev.signal_id), ev);
+
+  const total = sigRes.data?.length ?? 0;
+  const evaluated = (sigRes.data ?? []).filter((s) => evalMap.has(Number(s.id)));
   const pending = total - evaluated.length;
 
-  const returns = evaluated.map((s) => s.evaluations[0].return_pct);
-  const wins = returns.filter((r: number) => r > 0).length;
+  const returns = evaluated.map((s) => evalMap.get(Number(s.id))!.return_pct as number);
+  const wins = returns.filter((r) => r > 0).length;
 
   res.json({
     total,
@@ -44,7 +55,7 @@ signalsRouter.get('/stats', async (_req, res) => {
     pending,
     winRate: evaluated.length > 0 ? Math.round((wins / evaluated.length) * 10000) / 100 : null,
     avgReturn: returns.length > 0
-      ? Math.round((returns.reduce((a: number, b: number) => a + b, 0) / returns.length) * 100) / 100
+      ? Math.round((returns.reduce((a, b) => a + b, 0) / returns.length) * 100) / 100
       : null,
     bestReturn: returns.length > 0 ? Math.max(...returns) : null,
     worstReturn: returns.length > 0 ? Math.min(...returns) : null,
