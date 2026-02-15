@@ -175,7 +175,7 @@ export default function Chart() {
         const sig = signals.find(
           (s: Signal) => toChartTime(s.signal_date) === toChartTime(c.open_time)
         );
-        const evaluated = sig && sig.evaluations.length > 0;
+        const evaluated = sig && (sig.evaluations?.length ?? 0) > 0;
         const won = evaluated && sig.evaluations[0].return_pct > 0;
         return {
           time: toChartTime(c.open_time),

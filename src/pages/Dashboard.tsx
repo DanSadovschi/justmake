@@ -235,7 +235,7 @@ export default function Dashboard() {
           </div>
 
           {/* Latest signal detail */}
-          {latestSignal && latestSignal.evaluations.length > 0 && (
+          {latestSignal && latestSignal.evaluations?.length > 0 && (
             <div className="rounded border border-gray-800 bg-gray-900 p-4">
               <h3 className="text-sm font-medium text-gray-400 mb-2">Latest Signal Outcome</h3>
               {(() => {

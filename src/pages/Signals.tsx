@@ -33,8 +33,8 @@ export default function Signals() {
   }, []);
 
   const filtered = signals.filter((s) => {
-    if (filter === 'evaluated') return s.evaluations.length > 0;
-    if (filter === 'pending') return s.evaluations.length === 0;
+    if (filter === 'evaluated') return (s.evaluations?.length ?? 0) > 0;
+    if (filter === 'pending') return (s.evaluations?.length ?? 0) === 0;
     return true;
   });
 
@@ -82,7 +82,7 @@ export default function Signals() {
             </thead>
             <tbody>
               {filtered.map((s) => {
-                const ev = s.evaluations.length > 0 ? s.evaluations[0] : null;
+                const ev = (s.evaluations?.length ?? 0) > 0 ? s.evaluations[0] : null;
                 const exitInfo = ev?.exit_reason ? EXIT_LABELS[ev.exit_reason] : null;
                 return (
                   <tr key={s.id} className="border-b border-gray-800/50 hover:bg-gray-900/50">
