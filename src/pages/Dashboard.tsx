@@ -24,9 +24,93 @@ function timeAgo(ms: number): string {
   return `${Math.floor(hours / 24)}d ago`;
 }
 
+// Compute exit reason breakdown from signals
+function computeExitBreakdown(signals: Signal[]) {
+  const breakdown: Record<string, { count: number; totalReturn: number; wins: number }> = {};
+
+  for (const s of signals) {
+    const ev = s.evaluations?.length > 0 ? s.evaluations[0] : null;
+    if (!ev || !ev.exit_reason) continue;
+    if (!breakdown[ev.exit_reason]) breakdown[ev.exit_reason] = { count: 0, totalReturn: 0, wins: 0 };
+    breakdown[ev.exit_reason].count++;
+    breakdown[ev.exit_reason].totalReturn += ev.return_pct;
+    if (ev.return_pct > 0) breakdown[ev.exit_reason].wins++;
+  }
+
+  return Object.entries(breakdown).map(([reason, data]) => ({
+    reason,
+    count: data.count,
+    avgReturn: Math.round((data.totalReturn / data.count) * 100) / 100,
+    winRate: Math.round((data.wins / data.count) * 100),
+  })).sort((a, b) => b.count - a.count);
+}
+
+// Compute equity curve (cumulative return)
+function computeEquityCurve(signals: Signal[]) {
+  const evaluated = signals
+    .filter((s) => (s.evaluations?.length ?? 0) > 0)
+    .sort((a, b) => a.signal_date - b.signal_date);
+
+  let cumulative = 0;
+  return evaluated.map((s) => {
+    const ret = s.evaluations[0].return_pct;
+    cumulative += ret;
+    return {
+      date: s.signal_date,
+      returnPct: ret,
+      cumulative: Math.round(cumulative * 100) / 100,
+    };
+  });
+}
+
+// Compute confidence band analysis
+function computeConfidenceAnalysis(signals: Signal[]) {
+  const bands = [
+    { label: '75-100', min: 75, max: 100 },
+    { label: '50-74', min: 50, max: 74 },
+    { label: '25-49', min: 25, max: 49 },
+    { label: '0-24', min: 0, max: 24 },
+  ];
+
+  return bands.map(({ label, min, max }) => {
+    const inBand = signals.filter((s) => {
+      const c = s.confidence;
+      return c != null && c >= min && c <= max && (s.evaluations?.length ?? 0) > 0;
+    });
+    if (inBand.length === 0) return { label, count: 0, winRate: 0, avgReturn: 0 };
+
+    const wins = inBand.filter((s) => s.evaluations[0].return_pct > 0).length;
+    const totalReturn = inBand.reduce((sum, s) => sum + s.evaluations[0].return_pct, 0);
+
+    return {
+      label,
+      count: inBand.length,
+      winRate: Math.round((wins / inBand.length) * 100),
+      avgReturn: Math.round((totalReturn / inBand.length) * 100) / 100,
+    };
+  });
+}
+
+const EXIT_COLORS: Record<string, string> = {
+  stop_loss: 'bg-red-500',
+  take_profit: 'bg-green-500',
+  trailing_stop: 'bg-amber-500',
+  death_cross: 'bg-purple-500',
+  timeout: 'bg-gray-500',
+};
+
+const EXIT_LABELS: Record<string, string> = {
+  stop_loss: 'Stop Loss',
+  take_profit: 'Take Profit',
+  trailing_stop: 'Trailing Stop',
+  death_cross: 'Death Cross',
+  timeout: 'Timeout',
+};
+
 export default function Dashboard() {
   const [latestCandle, setLatestCandle] = useState<Candle | null>(null);
   const [latestSignal, setLatestSignal] = useState<Signal | null>(null);
+  const [allSignals, setAllSignals] = useState<Signal[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
   const [livePrice, setLivePrice] = useState<number | null>(null);
   const [livePriceTime, setLivePriceTime] = useState<number | null>(null);
@@ -46,6 +130,7 @@ export default function Dashboard() {
       ]);
       setLatestCandle(candles.length > 0 ? candles[candles.length - 1] : null);
       setLatestSignal(signals.length > 0 ? signals[0] : null);
+      setAllSignals(signals);
       setStats(statsData);
       return candles.length > 0 ? candles[candles.length - 1] : null;
     } catch (err) {
@@ -74,27 +159,24 @@ export default function Dashboard() {
     }
   }
 
-  // Fetch live price
   const fetchLivePrice = useCallback(async () => {
     try {
       const data = await api.getLivePrice();
       setLivePrice(data.price);
       setLivePriceTime(data.timestamp);
     } catch {
-      // silently ignore price fetch errors
+      // silently ignore
     }
   }, []);
 
-  // Initial load + auto-update if data is stale
   useEffect(() => {
     async function init() {
       const latest = await loadData();
       fetchLivePrice();
 
-      // Auto-update if data is stale (last candle older than 24h)
       if (!autoUpdated.current) {
         autoUpdated.current = true;
-        const staleThreshold = 24 * 60 * 60 * 1000; // 24 hours
+        const staleThreshold = 24 * 60 * 60 * 1000;
         if (!latest || Date.now() - latest.open_time > staleThreshold) {
           setMessage('Data is outdated. Auto-updating...');
           setUpdating(true);
@@ -117,7 +199,6 @@ export default function Dashboard() {
     init();
   }, [loadData, fetchLivePrice]);
 
-  // Live price polling every 30 seconds
   useEffect(() => {
     const interval = setInterval(fetchLivePrice, 30_000);
     return () => clearInterval(interval);
@@ -126,6 +207,13 @@ export default function Dashboard() {
   const priceChange = latestCandle && livePrice
     ? ((livePrice - latestCandle.close) / latestCandle.close) * 100
     : null;
+
+  const exitBreakdown = computeExitBreakdown(allSignals);
+  const equityCurve = computeEquityCurve(allSignals);
+  const confidenceAnalysis = computeConfidenceAnalysis(allSignals);
+  const maxCumulative = equityCurve.length > 0
+    ? Math.max(...equityCurve.map((e) => Math.abs(e.cumulative)), 1)
+    : 1;
 
   return (
     <div className="space-y-6">
@@ -161,9 +249,8 @@ export default function Dashboard() {
         <p className="text-gray-500">Loading...</p>
       ) : (
         <>
-          {/* Price cards */}
+          {/* Top cards */}
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-            {/* Live price card */}
             <Card title="BTC Live Price">
               {livePrice ? (
                 <>
@@ -189,9 +276,7 @@ export default function Dashboard() {
               {latestCandle ? (
                 <>
                   <p className="text-2xl font-bold">{formatUsd(latestCandle.close)}</p>
-                  <p className="text-xs text-gray-500 mt-1">
-                    {formatDate(latestCandle.open_time)} UTC
-                  </p>
+                  <p className="text-xs text-gray-500 mt-1">{formatDate(latestCandle.open_time)} UTC</p>
                 </>
               ) : (
                 <p className="text-gray-500">No data — click Update Data</p>
@@ -201,16 +286,27 @@ export default function Dashboard() {
             <Card title="Latest Signal">
               {latestSignal ? (
                 <>
-                  <p className="text-lg font-bold text-green-400">{latestSignal.direction}</p>
+                  <div className="flex items-center gap-2">
+                    <span className="text-lg font-bold text-green-400">{latestSignal.direction}</span>
+                    {latestSignal.confidence != null && (
+                      <span className={`rounded px-2 py-0.5 text-xs font-medium ${
+                        latestSignal.confidence >= 75 ? 'text-green-400 bg-green-900/30' :
+                        latestSignal.confidence >= 50 ? 'text-amber-400 bg-amber-900/30' :
+                        'text-red-400 bg-red-900/30'
+                      }`}>
+                        {latestSignal.confidence}/100
+                      </span>
+                    )}
+                  </div>
                   <p className="text-xs text-gray-500 mt-1">
                     {formatDate(latestSignal.signal_date)}
-                    {latestSignal.entry_price
-                      ? ` · Entry: ${formatUsd(latestSignal.entry_price)}`
-                      : ' · Entry pending'}
+                    {latestSignal.entry_price ? ` · ${formatUsd(latestSignal.entry_price)}` : ' · Entry pending'}
                   </p>
-                  <p className="text-xs text-gray-600 mt-1">
-                    EMA20: {latestSignal.ema20.toFixed(0)} / EMA50: {latestSignal.ema50.toFixed(0)}
-                  </p>
+                  {latestSignal.rsi14 != null && (
+                    <p className="text-xs text-gray-600 mt-1">
+                      RSI: {latestSignal.rsi14} · MACD: {latestSignal.macd_histogram} · Vol: {latestSignal.volume_ratio}x
+                    </p>
+                  )}
                 </>
               ) : (
                 <p className="text-gray-500">No signals yet</p>
@@ -235,7 +331,7 @@ export default function Dashboard() {
           </div>
 
           {/* Latest signal detail */}
-          {latestSignal && latestSignal.evaluations?.length > 0 && (
+          {latestSignal && (latestSignal.evaluations?.length ?? 0) > 0 && (
             <div className="rounded border border-gray-800 bg-gray-900 p-4">
               <h3 className="text-sm font-medium text-gray-400 mb-2">Latest Signal Outcome</h3>
               {(() => {
@@ -263,6 +359,97 @@ export default function Dashboard() {
                   </div>
                 );
               })()}
+            </div>
+          )}
+
+          {/* Analytics section */}
+          {exitBreakdown.length > 0 && (
+            <div className="grid gap-4 lg:grid-cols-2">
+              {/* Exit Reason Breakdown */}
+              <div className="rounded border border-gray-800 bg-gray-900 p-4">
+                <h3 className="text-sm font-medium text-gray-400 mb-3">Exit Reason Breakdown</h3>
+                <div className="space-y-2">
+                  {exitBreakdown.map((item) => {
+                    const totalEvaluated = exitBreakdown.reduce((s, e) => s + e.count, 0);
+                    const pct = totalEvaluated > 0 ? (item.count / totalEvaluated) * 100 : 0;
+                    return (
+                      <div key={item.reason} className="space-y-1">
+                        <div className="flex items-center justify-between text-xs">
+                          <span className="text-gray-300">{EXIT_LABELS[item.reason] ?? item.reason}</span>
+                          <span className="text-gray-500">
+                            {item.count} ({pct.toFixed(0)}%) · WR: {item.winRate}% · Avg: {formatPct(item.avgReturn)}
+                          </span>
+                        </div>
+                        <div className="h-2 rounded-full bg-gray-800 overflow-hidden">
+                          <div
+                            className={`h-full rounded-full ${EXIT_COLORS[item.reason] ?? 'bg-gray-500'}`}
+                            style={{ width: `${pct}%` }}
+                          />
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Confidence Analysis */}
+              <div className="rounded border border-gray-800 bg-gray-900 p-4">
+                <h3 className="text-sm font-medium text-gray-400 mb-3">Confidence Analysis</h3>
+                <div className="space-y-3">
+                  {confidenceAnalysis.map((band) => (
+                    <div key={band.label} className="flex items-center gap-3 text-sm">
+                      <span className="text-gray-500 w-12 text-xs">{band.label}</span>
+                      <div className="flex-1 h-6 rounded bg-gray-800 overflow-hidden relative">
+                        {band.count > 0 && (
+                          <div
+                            className={`h-full rounded ${band.avgReturn >= 0 ? 'bg-green-600/50' : 'bg-red-600/50'}`}
+                            style={{ width: `${Math.min(Math.abs(band.winRate), 100)}%` }}
+                          />
+                        )}
+                        <span className="absolute inset-0 flex items-center justify-center text-xs text-gray-300">
+                          {band.count > 0
+                            ? `${band.count} trades · WR ${band.winRate}% · Avg ${formatPct(band.avgReturn)}`
+                            : 'No trades'}
+                        </span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Equity Curve */}
+          {equityCurve.length > 0 && (
+            <div className="rounded border border-gray-800 bg-gray-900 p-4">
+              <h3 className="text-sm font-medium text-gray-400 mb-3">
+                Equity Curve (Cumulative Return: {formatPct(equityCurve[equityCurve.length - 1].cumulative)})
+              </h3>
+              <div className="flex items-end gap-1 h-32">
+                {equityCurve.map((point, i) => {
+                  const height = (Math.abs(point.cumulative) / maxCumulative) * 100;
+                  const isPositive = point.cumulative >= 0;
+                  return (
+                    <div
+                      key={i}
+                      className="flex-1 flex flex-col justify-end items-center group relative"
+                      style={{ height: '100%' }}
+                    >
+                      <div
+                        className={`w-full rounded-t-sm ${isPositive ? 'bg-green-500/70' : 'bg-red-500/70'} transition-all hover:opacity-100 opacity-80`}
+                        style={{ height: `${Math.max(height, 2)}%` }}
+                      />
+                      <div className="absolute bottom-full mb-1 hidden group-hover:block z-10 rounded bg-gray-800 border border-gray-700 px-2 py-1 text-xs text-gray-300 whitespace-nowrap">
+                        {formatDate(point.date)}: {formatPct(point.returnPct)} (Cum: {formatPct(point.cumulative)})
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              <div className="flex justify-between text-xs text-gray-600 mt-1">
+                <span>{equityCurve.length > 0 ? formatDate(equityCurve[0].date) : ''}</span>
+                <span>{equityCurve.length > 0 ? formatDate(equityCurve[equityCurve.length - 1].date) : ''}</span>
+              </div>
             </div>
           )}
         </>
