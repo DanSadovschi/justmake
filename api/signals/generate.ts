@@ -414,6 +414,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       }
     }
 
+    // Delete old evaluations without exit_reason (pre-smart-exit)
+    await supabase
+      .from('evaluations')
+      .delete()
+      .is('exit_reason', null);
+
     // Evaluate
     const { data: evaluatedIds, error: evalErr } = await supabase
       .from('evaluations')

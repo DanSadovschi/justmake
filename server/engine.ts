@@ -494,7 +494,24 @@ export async function generateAndEvaluateSignals(): Promise<{
     }
   }
 
-  // 6. Evaluate signals that haven't been evaluated yet
+  // 6. Delete old evaluations without exit_reason (pre-smart-exit) so they get re-evaluated
+  const { data: oldEvals, error: oldEvalErr } = await supabase
+    .from('evaluations')
+    .select('id')
+    .is('exit_reason', null);
+
+  if (oldEvalErr) throw new Error(oldEvalErr.message);
+
+  if (oldEvals && oldEvals.length > 0) {
+    console.log(`[engine] deleting ${oldEvals.length} old evaluations without exit_reason`);
+    const { error: delErr } = await supabase
+      .from('evaluations')
+      .delete()
+      .is('exit_reason', null);
+    if (delErr) throw new Error(delErr.message);
+  }
+
+  // 6b. Evaluate signals that haven't been evaluated yet
   const { data: evaluatedIds, error: evalErr } = await supabase
     .from('evaluations')
     .select('signal_id');
