@@ -25,6 +25,12 @@ export interface Signal {
   entry_price: number | null;
   ema20: number;
   ema50: number;
+  rsi14: number | null;
+  macd_line: number | null;
+  macd_signal: number | null;
+  macd_histogram: number | null;
+  volume_ratio: number | null;
+  confidence: number | null;
   reasoning: Record<string, unknown>;
   created_at: string;
   evaluations: Evaluation[];

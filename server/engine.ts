@@ -57,33 +57,106 @@ interface CandleRow {
   volume: number;
 }
 
-interface EmaPoint {
+interface DataPoint {
   open_time: number;
   close: number;
   open: number;
   high: number;
   low: number;
+  volume: number;
   ema20: number;
   ema50: number;
+  rsi14: number;
+  macd_line: number;
+  macd_signal: number;
+  macd_histogram: number;
+  volume_ratio: number;  // current volume / 20-period SMA
 }
 
-function computeEma(candles: CandleRow[], period: number): number[] {
+// ---------- EMA on raw values ----------
+
+function computeEmaValues(values: number[], period: number): number[] {
   const k = 2 / (period + 1);
   const ema: number[] = [];
-
-  for (let i = 0; i < candles.length; i++) {
-    if (i === 0) {
-      ema.push(candles[i].close);
-    } else {
-      ema.push(candles[i].close * k + ema[i - 1] * (1 - k));
-    }
+  for (let i = 0; i < values.length; i++) {
+    ema.push(i === 0 ? values[i] : values[i] * k + ema[i - 1] * (1 - k));
   }
   return ema;
 }
 
-function buildEmaData(candles: CandleRow[]): EmaPoint[] {
+function computeEma(candles: CandleRow[], period: number): number[] {
+  return computeEmaValues(candles.map((c) => c.close), period);
+}
+
+// ---------- RSI(14) ----------
+
+function computeRsi(candles: CandleRow[], period = 14): number[] {
+  const rsi: number[] = new Array(candles.length).fill(50);
+  if (candles.length < period + 1) return rsi;
+
+  // Initial average gain/loss from first `period` changes
+  let avgGain = 0;
+  let avgLoss = 0;
+  for (let i = 1; i <= period; i++) {
+    const change = candles[i].close - candles[i - 1].close;
+    if (change > 0) avgGain += change;
+    else avgLoss += Math.abs(change);
+  }
+  avgGain /= period;
+  avgLoss /= period;
+
+  rsi[period] = avgLoss === 0 ? 100 : 100 - 100 / (1 + avgGain / avgLoss);
+
+  // Smoothed RSI for remaining candles
+  for (let i = period + 1; i < candles.length; i++) {
+    const change = candles[i].close - candles[i - 1].close;
+    const gain = change > 0 ? change : 0;
+    const loss = change < 0 ? Math.abs(change) : 0;
+    avgGain = (avgGain * (period - 1) + gain) / period;
+    avgLoss = (avgLoss * (period - 1) + loss) / period;
+    rsi[i] = avgLoss === 0 ? 100 : 100 - 100 / (1 + avgGain / avgLoss);
+  }
+
+  return rsi;
+}
+
+// ---------- MACD(12, 26, 9) ----------
+
+function computeMacd(candles: CandleRow[]): {
+  line: number[];
+  signal: number[];
+  histogram: number[];
+} {
+  const ema12 = computeEma(candles, 12);
+  const ema26 = computeEma(candles, 26);
+  const line = ema12.map((v, i) => v - ema26[i]);
+  const signal = computeEmaValues(line, 9);
+  const histogram = line.map((v, i) => v - signal[i]);
+  return { line, signal, histogram };
+}
+
+// ---------- Volume Ratio (vs 20-period SMA) ----------
+
+function computeVolumeRatio(candles: CandleRow[], period = 20): number[] {
+  const ratio: number[] = new Array(candles.length).fill(1);
+  let sum = 0;
+  for (let i = 0; i < candles.length; i++) {
+    sum += candles[i].volume;
+    if (i >= period) sum -= candles[i - period].volume;
+    const avg = i >= period - 1 ? sum / Math.min(i + 1, period) : candles[i].volume;
+    ratio[i] = avg > 0 ? candles[i].volume / avg : 1;
+  }
+  return ratio;
+}
+
+// ---------- Build enriched data ----------
+
+function buildDataPoints(candles: CandleRow[]): DataPoint[] {
   const ema20 = computeEma(candles, 20);
   const ema50 = computeEma(candles, 50);
+  const rsi14 = computeRsi(candles, 14);
+  const macd = computeMacd(candles);
+  const volRatio = computeVolumeRatio(candles, 20);
 
   return candles.map((c, i) => ({
     open_time: c.open_time,
@@ -91,8 +164,14 @@ function buildEmaData(candles: CandleRow[]): EmaPoint[] {
     open: c.open,
     high: c.high,
     low: c.low,
+    volume: c.volume,
     ema20: ema20[i],
     ema50: ema50[i],
+    rsi14: Math.round(rsi14[i] * 100) / 100,
+    macd_line: Math.round(macd.line[i] * 100) / 100,
+    macd_signal: Math.round(macd.signal[i] * 100) / 100,
+    macd_histogram: Math.round(macd.histogram[i] * 100) / 100,
+    volume_ratio: Math.round(volRatio[i] * 100) / 100,
   }));
 }
 
@@ -108,6 +187,34 @@ const EMA_WARMUP = 50;     // Skip first 50 candles for EMA stability
 
 type ExitReason = 'stop_loss' | 'take_profit' | 'trailing_stop' | 'death_cross' | 'timeout';
 
+// ---------- Confidence score ----------
+
+function computeConfidence(dp: DataPoint): number {
+  let score = 0;
+
+  // RSI zone (0–30 pts)
+  if (dp.rsi14 >= 30 && dp.rsi14 <= 50) score += 30;       // ideal oversold recovery
+  else if (dp.rsi14 > 50 && dp.rsi14 <= 60) score += 20;   // neutral-bullish
+  else if (dp.rsi14 > 60 && dp.rsi14 <= 70) score += 10;   // slightly overbought
+  // >70 or <30: 0 pts (extreme)
+
+  // MACD (0–30 pts)
+  if (dp.macd_histogram > 0) score += 15;                   // bullish momentum
+  if (dp.macd_line > dp.macd_signal) score += 15;           // MACD above signal
+
+  // Volume confirmation (0–20 pts)
+  if (dp.volume_ratio >= 1.5) score += 20;                  // strong volume
+  else if (dp.volume_ratio >= 1.0) score += 10;             // above average
+
+  // EMA spread strength (0–20 pts)
+  const emaSpread = ((dp.ema20 - dp.ema50) / dp.ema50) * 100;
+  if (emaSpread > 2) score += 20;                           // strong trend
+  else if (emaSpread > 0.5) score += 10;                    // moderate
+  else score += 5;                                          // just crossed
+
+  return score;
+}
+
 // ---------- Signal detection ----------
 
 interface NewSignal {
@@ -116,24 +223,29 @@ interface NewSignal {
   entry_price: number | null;
   ema20: number;
   ema50: number;
+  rsi14: number;
+  macd_line: number;
+  macd_signal: number;
+  macd_histogram: number;
+  volume_ratio: number;
+  confidence: number;
   reasoning: Record<string, unknown>;
 }
 
-function detectSignals(emaData: EmaPoint[], existingSignalDates: Set<number>): NewSignal[] {
+function detectSignals(data: DataPoint[], existingSignalDates: Set<number>): NewSignal[] {
   const signals: NewSignal[] = [];
   let lastSignalIdx = -Infinity;
 
-  for (let i = EMA_WARMUP; i < emaData.length; i++) {
-    const prev = emaData[i - 1];
-    const curr = emaData[i];
+  for (let i = EMA_WARMUP; i < data.length; i++) {
+    const prev = data[i - 1];
+    const curr = data[i];
 
-    // Track cooldown for existing signals too (fix: was skipping without updating)
+    // Track cooldown for existing signals too
     if (existingSignalDates.has(curr.open_time)) {
       lastSignalIdx = i;
       continue;
     }
 
-    // Skip if we're still within the cooldown of a previous signal
     if (i - lastSignalIdx <= COOLDOWN_DAYS) continue;
 
     // Check crossover conditions
@@ -142,7 +254,8 @@ function detectSignals(emaData: EmaPoint[], existingSignalDates: Set<number>): N
     const closeAboveEma50 = curr.close > curr.ema50;
 
     if (prevEma20BelowOrEqual && currEma20Above && closeAboveEma50) {
-      const nextCandle = i + 1 < emaData.length ? emaData[i + 1] : null;
+      const nextCandle = i + 1 < data.length ? data[i + 1] : null;
+      const confidence = computeConfidence(curr);
 
       signals.push({
         signal_date: curr.open_time,
@@ -150,14 +263,19 @@ function detectSignals(emaData: EmaPoint[], existingSignalDates: Set<number>): N
         entry_price: nextCandle ? nextCandle.open : null,
         ema20: curr.ema20,
         ema50: curr.ema50,
+        rsi14: curr.rsi14,
+        macd_line: curr.macd_line,
+        macd_signal: curr.macd_signal,
+        macd_histogram: curr.macd_histogram,
+        volume_ratio: curr.volume_ratio,
+        confidence,
         reasoning: {
-          prev_ema20: prev.ema20,
-          prev_ema50: prev.ema50,
-          curr_ema20: curr.ema20,
-          curr_ema50: curr.ema50,
-          curr_close: curr.close,
           crossover: 'EMA20 crossed above EMA50',
           close_condition: 'Close > EMA50',
+          rsi14: curr.rsi14,
+          macd_histogram: curr.macd_histogram,
+          volume_ratio: curr.volume_ratio,
+          confidence,
         },
       });
 
@@ -190,11 +308,11 @@ interface EvalResult {
 
 function evaluateSignals(
   signalsToEval: SignalRow[],
-  emaData: EmaPoint[],
+  data: DataPoint[],
 ): EvalResult[] {
   const timeToIdx = new Map<number, number>();
-  for (let i = 0; i < emaData.length; i++) {
-    timeToIdx.set(emaData[i].open_time, i);
+  for (let i = 0; i < data.length; i++) {
+    timeToIdx.set(data[i].open_time, i);
   }
 
   const results: EvalResult[] = [];
@@ -208,8 +326,7 @@ function evaluateSignals(
     const entryIdx = sigIdx + 1;
     const entryPrice = sig.entry_price;
 
-    // Need at least a few candles after entry
-    if (entryIdx + 1 >= emaData.length) continue;
+    if (entryIdx + 1 >= data.length) continue;
 
     const slPrice = entryPrice * (1 + SL_PCT / 100);
     const tpPrice = entryPrice * (1 + TP_PCT / 100);
@@ -222,69 +339,43 @@ function evaluateSignals(
     let maxAdverse = 0;
     let maxFavorable = 0;
 
-    const maxIdx = Math.min(entryIdx + MAX_HOLD_DAYS, emaData.length - 1);
+    const maxIdx = Math.min(entryIdx + MAX_HOLD_DAYS, data.length - 1);
 
     for (let j = entryIdx; j <= maxIdx; j++) {
-      const candle = emaData[j];
+      const candle = data[j];
 
-      // Track max adverse / favorable
       const advPct = ((candle.low - entryPrice) / entryPrice) * 100;
       const favPct = ((candle.high - entryPrice) / entryPrice) * 100;
       if (advPct < maxAdverse) maxAdverse = advPct;
       if (favPct > maxFavorable) maxFavorable = favPct;
-
-      // Track peak close for trailing stop
       if (candle.close > peakClose) peakClose = candle.close;
 
-      // 1. Stop Loss — close dropped to SL level
-      if (candle.close <= slPrice) {
-        exitReason = 'stop_loss';
-        exitIdx = j;
-        break;
-      }
+      if (candle.close <= slPrice) { exitReason = 'stop_loss'; exitIdx = j; break; }
+      if (candle.close >= tpPrice) { exitReason = 'take_profit'; exitIdx = j; break; }
 
-      // 2. Take Profit — close reached TP level
-      if (candle.close >= tpPrice) {
-        exitReason = 'take_profit';
-        exitIdx = j;
-        break;
-      }
-
-      // 3. Trailing Stop — activate once +8%, trigger on 3% drop from peak
-      if (!trailActive && candle.close >= trailActivatePrice) {
-        trailActive = true;
-      }
+      if (!trailActive && candle.close >= trailActivatePrice) trailActive = true;
       if (trailActive) {
         const dropFromPeak = ((peakClose - candle.close) / peakClose) * 100;
-        if (dropFromPeak >= TRAIL_DROP) {
-          exitReason = 'trailing_stop';
-          exitIdx = j;
-          break;
-        }
+        if (dropFromPeak >= TRAIL_DROP) { exitReason = 'trailing_stop'; exitIdx = j; break; }
       }
 
-      // 4. Death Cross — EMA20 crosses below EMA50 (skip entry day)
       if (j > entryIdx) {
-        const prevDay = emaData[j - 1];
+        const prevDay = data[j - 1];
         if (prevDay.ema20 >= prevDay.ema50 && candle.ema20 < candle.ema50) {
-          exitReason = 'death_cross';
-          exitIdx = j;
-          break;
+          exitReason = 'death_cross'; exitIdx = j; break;
         }
       }
     }
 
-    // 5. Timeout — reached max hold days without any other exit
     if (exitReason === null) {
-      if (maxIdx >= emaData.length) continue; // not enough data yet
+      if (maxIdx >= data.length) continue;
       exitReason = 'timeout';
       exitIdx = maxIdx;
     }
 
-    const exitCandle = emaData[exitIdx];
+    const exitCandle = data[exitIdx];
     const exitPrice = exitCandle.close;
     const returnPct = ((exitPrice - entryPrice) / entryPrice) * 100;
-    const holdDays = exitIdx - entryIdx;
 
     results.push({
       signal_id: sig.id,
@@ -295,7 +386,7 @@ function evaluateSignals(
       max_adverse_pct: Math.round(maxAdverse * 100) / 100,
       max_favorable_pct: Math.round(maxFavorable * 100) / 100,
       exit_reason: exitReason,
-      hold_days: holdDays,
+      hold_days: exitIdx - entryIdx,
     });
   }
 
@@ -324,7 +415,7 @@ export async function generateAndEvaluateSignals(): Promise<{
     return { generated: 0, evaluated: 0 };
   }
 
-  const emaData = buildEmaData(candles);
+  const data = buildDataPoints(candles);
 
   // 2. Load existing signal dates to avoid duplicates
   const { data: existingSignals, error: sigErr } = await supabase
@@ -336,7 +427,7 @@ export async function generateAndEvaluateSignals(): Promise<{
   const existingDates = new Set((existingSignals ?? []).map((s) => Number(s.signal_date)));
 
   // 3. Detect new signals
-  const newSignals = detectSignals(emaData, existingDates);
+  const newSignals = detectSignals(data, existingDates);
 
   // 4. Insert new signals
   if (newSignals.length > 0) {
@@ -359,7 +450,7 @@ export async function generateAndEvaluateSignals(): Promise<{
 
   const { data: allSignals, error: allSigErr } = await supabase
     .from('signals')
-    .select('id, signal_date, entry_price');
+    .select('id, signal_date, entry_price, confidence');
 
   if (allSigErr) throw new Error(allSigErr.message);
 
@@ -413,7 +504,39 @@ export async function generateAndEvaluateSignals(): Promise<{
     console.log(`[engine] sample signal: id=${sample.id} date=${sample.signal_date} entry=${sample.entry_price}`);
   }
 
-  const evalResults = evaluateSignals(signalsToEval, emaData);
+  // 6b. Backfill indicators for existing signals missing confidence
+  const timeToDataIdx = new Map<number, number>();
+  for (let i = 0; i < data.length; i++) timeToDataIdx.set(data[i].open_time, i);
+
+  for (const sig of allSignals ?? []) {
+    const sigDate = Number(sig.signal_date);
+    const idx = timeToDataIdx.get(sigDate);
+    if (idx !== undefined && sig.confidence == null) {
+      const dp = data[idx];
+      const confidence = computeConfidence(dp);
+      await supabase
+        .from('signals')
+        .update({
+          rsi14: dp.rsi14,
+          macd_line: dp.macd_line,
+          macd_signal: dp.macd_signal,
+          macd_histogram: dp.macd_histogram,
+          volume_ratio: dp.volume_ratio,
+          confidence,
+          reasoning: {
+            crossover: 'EMA20 crossed above EMA50',
+            close_condition: 'Close > EMA50',
+            rsi14: dp.rsi14,
+            macd_histogram: dp.macd_histogram,
+            volume_ratio: dp.volume_ratio,
+            confidence,
+          },
+        })
+        .eq('id', sig.id);
+    }
+  }
+
+  const evalResults = evaluateSignals(signalsToEval, data);
   console.log(`[engine] evaluation results: ${evalResults.length}`);
 
   if (evalResults.length > 0) {

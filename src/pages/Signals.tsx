@@ -21,6 +21,27 @@ const EXIT_LABELS: Record<ExitReason, { label: string; color: string }> = {
   timeout:       { label: 'Timeout',       color: 'text-gray-400 bg-gray-800' },
 };
 
+function confidenceBadge(score: number | null) {
+  if (score == null) return <span className="text-gray-600">—</span>;
+  let color = 'text-gray-400 bg-gray-800';
+  if (score >= 75) color = 'text-green-400 bg-green-900/30';
+  else if (score >= 50) color = 'text-amber-400 bg-amber-900/30';
+  else if (score >= 25) color = 'text-orange-400 bg-orange-900/30';
+  else color = 'text-red-400 bg-red-900/30';
+  return <span className={`rounded px-2 py-0.5 text-xs font-medium ${color}`}>{score}</span>;
+}
+
+function rsiBadge(rsi: number | null) {
+  if (rsi == null) return <span className="text-gray-600">—</span>;
+  let color = 'text-gray-400';
+  if (rsi >= 70) color = 'text-red-400';
+  else if (rsi >= 60) color = 'text-amber-400';
+  else if (rsi >= 40) color = 'text-green-400';
+  else if (rsi >= 30) color = 'text-blue-400';
+  else color = 'text-red-400';
+  return <span className={`text-xs ${color}`}>{rsi.toFixed(1)}</span>;
+}
+
 type StatusFilter = 'all' | 'evaluated' | 'pending';
 
 export default function Signals() {
@@ -69,7 +90,11 @@ export default function Signals() {
             <thead>
               <tr className="border-b border-gray-800 text-left text-xs uppercase tracking-wider text-gray-500">
                 <th className="px-3 py-2">Date</th>
-                <th className="px-3 py-2">Direction</th>
+                <th className="px-3 py-2">Dir</th>
+                <th className="px-3 py-2">Conf</th>
+                <th className="px-3 py-2">RSI</th>
+                <th className="px-3 py-2">MACD</th>
+                <th className="px-3 py-2">Vol</th>
                 <th className="px-3 py-2">Entry</th>
                 <th className="px-3 py-2">Exit</th>
                 <th className="px-3 py-2">Return</th>
@@ -77,7 +102,6 @@ export default function Signals() {
                 <th className="px-3 py-2">Hold</th>
                 <th className="px-3 py-2">Drawdown</th>
                 <th className="px-3 py-2">Run-up</th>
-                <th className="px-3 py-2">Exit Date</th>
               </tr>
             </thead>
             <tbody>
@@ -91,6 +115,22 @@ export default function Signals() {
                       <span className="rounded bg-green-900/40 px-2 py-0.5 text-xs text-green-400">
                         {s.direction}
                       </span>
+                    </td>
+                    <td className="px-3 py-2">{confidenceBadge(s.confidence)}</td>
+                    <td className="px-3 py-2">{rsiBadge(s.rsi14)}</td>
+                    <td className="px-3 py-2">
+                      {s.macd_histogram != null ? (
+                        <span className={`text-xs ${s.macd_histogram >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                          {s.macd_histogram >= 0 ? '+' : ''}{s.macd_histogram.toFixed(0)}
+                        </span>
+                      ) : <span className="text-gray-600">—</span>}
+                    </td>
+                    <td className="px-3 py-2">
+                      {s.volume_ratio != null ? (
+                        <span className={`text-xs ${s.volume_ratio >= 1.5 ? 'text-green-400' : s.volume_ratio >= 1 ? 'text-gray-300' : 'text-gray-500'}`}>
+                          {s.volume_ratio.toFixed(1)}x
+                        </span>
+                      ) : <span className="text-gray-600">—</span>}
                     </td>
                     <td className="px-3 py-2">
                       {s.entry_price ? formatUsd(s.entry_price) : '—'}
@@ -126,9 +166,6 @@ export default function Signals() {
                       {ev ? (
                         <span className="text-green-400">{formatPct(ev.max_favorable_pct)}</span>
                       ) : '—'}
-                    </td>
-                    <td className="px-3 py-2 text-gray-400">
-                      {ev ? formatDate(ev.exit_date) : '—'}
                     </td>
                   </tr>
                 );
