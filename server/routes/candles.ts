@@ -51,11 +51,11 @@ candlesRouter.post('/update', async (_req, res) => {
     // Map to DB rows
     const rows = klines.map((k) => ({
       open_time: k.openTime,
-      open: parseFloat(k.open),
-      high: parseFloat(k.high),
-      low: parseFloat(k.low),
-      close: parseFloat(k.close),
-      volume: parseFloat(k.volume),
+      open: k.open,
+      high: k.high,
+      low: k.low,
+      close: k.close,
+      volume: k.volume,
       fetched_at: new Date().toISOString(),
     }));
 

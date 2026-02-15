@@ -1,43 +1,57 @@
 /**
- * Binance public API client — fetches daily OHLCV candles for BTCUSDT.
+ * CryptoCompare public API client — fetches daily OHLCV candles for BTC/USD.
  *
- * Endpoint: GET https://api.binance.com/api/v3/klines
- * Docs: https://binance-docs.github.io/apidocs/spot/en/#kline-candlestick-data
+ * Endpoint: GET https://min-api.cryptocompare.com/data/v2/histoday
+ * Docs: https://min-api.cryptocompare.com/documentation?key=Historical&cat=dataHistoday
  *
- * No API key required for public market data.
+ * No API key required for basic usage. No geo-restrictions.
+ * Note: uses BTC/USD (not USDT) — acceptable for a demo.
  */
 
-export interface BinanceKline {
-  openTime: number;   // Unix ms
-  open: string;
-  high: string;
-  low: string;
-  close: string;
-  volume: string;
+export interface DailyCandle {
+  openTime: number;   // Unix ms (converted from CryptoCompare's Unix seconds)
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
 }
 
-const BASE_URL = 'https://api.binance.com/api/v3/klines';
-const SYMBOL = 'BTCUSDT';
-const INTERVAL = '1d';
-const MAX_LIMIT = 1000;
+const BASE_URL = 'https://min-api.cryptocompare.com/data/v2/histoday';
+const MAX_LIMIT = 2000;
+
+interface CryptoCompareResponse {
+  Response: string;
+  Message: string;
+  Data: {
+    Data: Array<{
+      time: number;      // Unix seconds
+      open: number;
+      high: number;
+      low: number;
+      close: number;
+      volumefrom: number; // BTC volume
+    }>;
+  };
+}
 
 /**
- * Fetch daily candles from Binance.
- * @param startTime - Unix ms, inclusive. If omitted, fetches the latest `limit` candles.
- * @param limit - Number of candles (max 1000).
+ * Fetch daily candles from CryptoCompare.
+ * @param limit - Number of candles (max 2000).
+ * @param toTs - Unix seconds, fetch candles ending at this time. Omit for latest.
  */
 export async function fetchDailyCandles(
-  startTime?: number,
   limit: number = MAX_LIMIT,
-): Promise<BinanceKline[]> {
+  toTs?: number,
+): Promise<DailyCandle[]> {
   const params = new URLSearchParams({
-    symbol: SYMBOL,
-    interval: INTERVAL,
+    fsym: 'BTC',
+    tsym: 'USD',
     limit: String(Math.min(limit, MAX_LIMIT)),
   });
 
-  if (startTime !== undefined) {
-    params.set('startTime', String(startTime));
+  if (toTs !== undefined) {
+    params.set('toTs', String(toTs));
   }
 
   const url = `${BASE_URL}?${params}`;
@@ -45,41 +59,60 @@ export async function fetchDailyCandles(
 
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`Binance API error ${res.status}: ${text}`);
+    throw new Error(`CryptoCompare API error ${res.status}: ${text}`);
   }
 
-  const raw = (await res.json()) as unknown[][];
+  const json = (await res.json()) as CryptoCompareResponse;
 
-  return raw.map((k) => ({
-    openTime: k[0] as number,
-    open: k[1] as string,
-    high: k[2] as string,
-    low: k[3] as string,
-    close: k[4] as string,
-    volume: k[5] as string,
-  }));
+  if (json.Response === 'Error') {
+    throw new Error(`CryptoCompare: ${json.Message}`);
+  }
+
+  return json.Data.Data
+    .filter((d) => d.close > 0) // filter out empty/zero candles
+    .map((d) => ({
+      openTime: d.time * 1000,    // convert seconds → ms for our schema
+      open: d.open,
+      high: d.high,
+      low: d.low,
+      close: d.close,
+      volume: d.volumefrom,
+    }));
 }
 
 /**
- * Fetch all candles from `startTime` to now, paginating in chunks of 1000.
+ * Fetch all candles from a given startTime (Unix ms) to now, paginating backwards.
  */
-export async function fetchAllCandlesSince(startTime: number): Promise<BinanceKline[]> {
-  const all: BinanceKline[] = [];
-  let cursor = startTime;
+export async function fetchAllCandlesSince(startTimeMs: number): Promise<DailyCandle[]> {
+  // CryptoCompare paginates backwards with `toTs`.
+  // Strategy: fetch latest 2000, then keep going back if needed.
+  const all: DailyCandle[] = [];
+  let toTs: number | undefined = undefined;
 
   while (true) {
-    const batch = await fetchDailyCandles(cursor, MAX_LIMIT);
+    const batch = await fetchDailyCandles(MAX_LIMIT, toTs);
     if (batch.length === 0) break;
 
-    all.push(...batch);
+    // Filter to only candles >= startTimeMs
+    const relevant = batch.filter((c) => c.openTime >= startTimeMs);
+    all.push(...relevant);
 
-    // Next page starts 1ms after the last candle's open_time
-    const lastOpenTime = batch[batch.length - 1].openTime;
-    cursor = lastOpenTime + 1;
+    // If the oldest candle in this batch is still newer than startTime,
+    // we need to go further back
+    const oldestInBatch = batch[0].openTime;
+    if (oldestInBatch <= startTimeMs || batch.length < MAX_LIMIT) break;
 
-    // If we got fewer than MAX_LIMIT, we've reached the end
-    if (batch.length < MAX_LIMIT) break;
+    // Next page ends 1 second before the oldest candle
+    toTs = Math.floor(oldestInBatch / 1000) - 1;
   }
 
-  return all;
+  // Deduplicate and sort ascending
+  const seen = new Set<number>();
+  const unique = all.filter((c) => {
+    if (seen.has(c.openTime)) return false;
+    seen.add(c.openTime);
+    return true;
+  });
+
+  return unique.sort((a, b) => a.openTime - b.openTime);
 }

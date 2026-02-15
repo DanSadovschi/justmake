@@ -6,50 +6,85 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
 
-interface BinanceKline {
-  openTime: number;
-  open: string;
-  high: string;
-  low: string;
-  close: string;
-  volume: string;
+/**
+ * CryptoCompare public API — daily OHLCV for BTC/USD.
+ * Endpoint: GET https://min-api.cryptocompare.com/data/v2/histoday
+ * No API key required. No geo-restrictions.
+ */
+
+const BASE_URL = 'https://min-api.cryptocompare.com/data/v2/histoday';
+const MAX_LIMIT = 2000;
+
+interface CryptoCompareResponse {
+  Response: string;
+  Message: string;
+  Data: {
+    Data: Array<{
+      time: number;
+      open: number;
+      high: number;
+      low: number;
+      close: number;
+      volumefrom: number;
+    }>;
+  };
 }
 
-const BASE_URL = 'https://api.binance.com/api/v3/klines';
+interface DailyCandle {
+  openTime: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+}
 
-async function fetchDailyCandles(startTime?: number, limit = 1000): Promise<BinanceKline[]> {
+async function fetchDailyCandles(limit = MAX_LIMIT, toTs?: number): Promise<DailyCandle[]> {
   const params = new URLSearchParams({
-    symbol: 'BTCUSDT',
-    interval: '1d',
-    limit: String(Math.min(limit, 1000)),
+    fsym: 'BTC',
+    tsym: 'USD',
+    limit: String(Math.min(limit, MAX_LIMIT)),
   });
-  if (startTime !== undefined) params.set('startTime', String(startTime));
+  if (toTs !== undefined) params.set('toTs', String(toTs));
 
   const r = await fetch(`${BASE_URL}?${params}`);
-  if (!r.ok) throw new Error(`Binance API error ${r.status}: ${await r.text()}`);
+  if (!r.ok) throw new Error(`CryptoCompare error ${r.status}: ${await r.text()}`);
 
-  const raw = (await r.json()) as unknown[][];
-  return raw.map((k) => ({
-    openTime: k[0] as number,
-    open: k[1] as string,
-    high: k[2] as string,
-    low: k[3] as string,
-    close: k[4] as string,
-    volume: k[5] as string,
-  }));
+  const json = (await r.json()) as CryptoCompareResponse;
+  if (json.Response === 'Error') throw new Error(`CryptoCompare: ${json.Message}`);
+
+  return json.Data.Data
+    .filter((d) => d.close > 0)
+    .map((d) => ({
+      openTime: d.time * 1000,
+      open: d.open,
+      high: d.high,
+      low: d.low,
+      close: d.close,
+      volume: d.volumefrom,
+    }));
 }
 
-async function fetchAllCandlesSince(startTime: number): Promise<BinanceKline[]> {
-  const all: BinanceKline[] = [];
-  let cursor = startTime;
+async function fetchAllCandlesSince(startTimeMs: number): Promise<DailyCandle[]> {
+  const all: DailyCandle[] = [];
+  let toTs: number | undefined = undefined;
+
   while (true) {
-    const batch = await fetchDailyCandles(cursor, 1000);
+    const batch = await fetchDailyCandles(MAX_LIMIT, toTs);
     if (batch.length === 0) break;
-    all.push(...batch);
-    cursor = batch[batch.length - 1].openTime + 1;
-    if (batch.length < 1000) break;
+
+    const relevant = batch.filter((c) => c.openTime >= startTimeMs);
+    all.push(...relevant);
+
+    const oldestInBatch = batch[0].openTime;
+    if (oldestInBatch <= startTimeMs || batch.length < MAX_LIMIT) break;
+    toTs = Math.floor(oldestInBatch / 1000) - 1;
   }
-  return all;
+
+  const seen = new Set<number>();
+  return all
+    .filter((c) => { if (seen.has(c.openTime)) return false; seen.add(c.openTime); return true; })
+    .sort((a, b) => a.openTime - b.openTime);
 }
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
@@ -64,22 +99,22 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     if (latestErr) return res.status(500).json({ error: latestErr.message });
 
-    let klines;
+    let candles;
     if (latest && latest.length > 0) {
-      klines = await fetchAllCandlesSince(latest[0].open_time + 1);
+      candles = await fetchAllCandlesSince(latest[0].open_time + 1);
     } else {
-      klines = await fetchDailyCandles();
+      candles = await fetchDailyCandles();
     }
 
-    if (klines.length === 0) return res.json({ inserted: 0, message: 'Already up to date' });
+    if (candles.length === 0) return res.json({ inserted: 0, message: 'Already up to date' });
 
-    const rows = klines.map((k) => ({
+    const rows = candles.map((k) => ({
       open_time: k.openTime,
-      open: parseFloat(k.open),
-      high: parseFloat(k.high),
-      low: parseFloat(k.low),
-      close: parseFloat(k.close),
-      volume: parseFloat(k.volume),
+      open: k.open,
+      high: k.high,
+      low: k.low,
+      close: k.close,
+      volume: k.volume,
       fetched_at: new Date().toISOString(),
     }));
 
