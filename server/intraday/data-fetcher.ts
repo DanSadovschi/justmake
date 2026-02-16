@@ -1,87 +1,81 @@
 /**
- * Data Fetcher — Binance public API, no key needed.
+ * Data Fetcher — CryptoCompare hourly via curl.
+ * Uses curl because Node.js fetch has DNS issues in some environments.
  * Single export: fetchCandles(lookbackDays, interval)
  */
 
+import { execSync } from 'child_process';
 import type { Candle } from './types.js';
 
-const BINANCE_KLINES = 'https://api.binance.com/api/v3/klines';
-const LIMIT = 1000;
+const CC_LIMIT = 2000;
 
-type BinanceKline = [
-  number, string, string, string, string, string,
-  number, string, number, string, string, string,
-];
+interface CcResponse {
+  Response: string;
+  Message: string;
+  Data: {
+    Data: Array<{
+      time: number; open: number; high: number;
+      low: number; close: number; volumefrom: number;
+    }>;
+  };
+}
 
-const INTERVAL_MS: Record<string, number> = {
-  '5m': 300_000,
-  '15m': 900_000,
-  '1h': 3_600_000,
-  '4h': 14_400_000,
-};
+function curlJson<T>(url: string): T {
+  const out = execSync(`curl -s "${url}"`, { timeout: 30_000 });
+  return JSON.parse(out.toString()) as T;
+}
 
-async function fetchPage(
-  symbol: string,
-  interval: string,
-  startTime: number,
-): Promise<Candle[]> {
-  const params = new URLSearchParams({
-    symbol,
-    interval,
-    startTime: String(startTime),
-    limit: String(LIMIT),
-  });
+function fetchCcPage(limit = CC_LIMIT, toTs?: number): Candle[] {
+  let url = `https://min-api.cryptocompare.com/data/v2/histohour?fsym=BTC&tsym=USD&limit=${limit}`;
+  if (toTs !== undefined) url += `&toTs=${toTs}`;
 
-  const res = await fetch(`${BINANCE_KLINES}?${params}`);
-  if (!res.ok) throw new Error(`Binance ${res.status}: ${await res.text()}`);
+  const json = curlJson<CcResponse>(url);
+  if (json.Response === 'Error') throw new Error(`CC: ${json.Message}`);
 
-  const data = (await res.json()) as BinanceKline[];
-  return data.map(k => ({
-    openTime: k[0],
-    open: parseFloat(k[1]),
-    high: parseFloat(k[2]),
-    low: parseFloat(k[3]),
-    close: parseFloat(k[4]),
-    volume: parseFloat(k[5]),
-  }));
+  return json.Data.Data
+    .filter(d => d.close > 0)
+    .map(d => ({
+      openTime: d.time * 1000,
+      open: d.open,
+      high: d.high,
+      low: d.low,
+      close: d.close,
+      volume: d.volumefrom,
+    }));
 }
 
 /**
- * Fetch BTCUSDT candles from Binance.
- * Paginates automatically. ~3 req/s to stay within rate limits.
+ * Fetch BTC/USD hourly candles from CryptoCompare.
+ * Paginates backwards from now. Max ~2000 candles per request.
  */
-export async function fetchCandles(
+export function fetchCandles(
   lookbackDays: number,
-  interval: string,
-): Promise<Candle[]> {
+  _interval: string,
+): Candle[] {
   const startMs = Date.now() - lookbackDays * 86_400_000;
-  const intMs = INTERVAL_MS[interval] ?? 3_600_000;
   const all: Candle[] = [];
-  let cursor = startMs;
+  let toTs: number | undefined;
 
-  console.log(`[data] Fetching BTCUSDT ${interval} from Binance...`);
+  console.log(`[data] Fetching BTC/USD hourly from CryptoCompare (${lookbackDays} days)...`);
 
-  for (let page = 0; page < 250; page++) {
-    const batch = await fetchPage('BTCUSDT', interval, cursor);
+  for (let p = 0; p < 20; p++) {
+    const batch = fetchCcPage(CC_LIMIT, toTs);
     if (batch.length === 0) break;
 
-    all.push(...batch);
-    cursor = batch[batch.length - 1].openTime + intMs;
-    if (batch.length < LIMIT || cursor >= Date.now()) break;
+    all.push(...batch.filter(c => c.openTime >= startMs));
+    const oldest = batch[0].openTime;
+    if (oldest <= startMs || batch.length < CC_LIMIT) break;
+    toTs = Math.floor(oldest / 1000) - 1;
 
-    await new Promise(r => setTimeout(r, 350));
-    if ((page + 1) % 20 === 0) {
-      console.log(`[data] page ${page + 1}, ${all.length} candles...`);
-    }
+    if (p > 0) console.log(`[data] page ${p + 1}, ${all.length} candles so far...`);
   }
 
-  console.log(`[data] Fetched ${all.length} candles`);
-
-  // Deduplicate
+  // Deduplicate + sort
   const seen = new Set<number>();
-  return all.filter(c => {
-    if (seen.has(c.openTime)) return false;
-    seen.add(c.openTime);
-    return true;
-  });
+  const candles = all
+    .filter(c => { if (seen.has(c.openTime)) return false; seen.add(c.openTime); return true; })
+    .sort((a, b) => a.openTime - b.openTime);
+
+  console.log(`[data] Got ${candles.length} hourly candles`);
+  return candles;
 }

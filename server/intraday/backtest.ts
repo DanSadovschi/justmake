@@ -44,7 +44,6 @@ export function runBacktest(candles: Candle[], cfg: Config): BacktestResult {
   let trailActive = false;
   let trailStop = -Infinity;
 
-  let pendingStop = 0;
   let pendingAtr = 0;
   let hasPending = false;
   let cooldownUntil = 0;
@@ -57,8 +56,9 @@ export function runBacktest(candles: Candle[], cfg: Config): BacktestResult {
       entryPrice = c.open;
       entryTime = c.openTime;
       entryIdx = i;
-      stopLoss = pendingStop;
       atrAtEntry = pendingAtr;
+      // Recalculate SL from actual entry price (not signal candle close)
+      stopLoss = entryPrice - cfg.slAtrMultiple * atrAtEntry;
 
       const riskUsd = capital * cfg.riskPerTrade;
       const riskPerUnit = Math.abs(entryPrice - stopLoss);
@@ -77,14 +77,14 @@ export function runBacktest(candles: Candle[], cfg: Config): BacktestResult {
       let exitPrice = 0;
       let exitReason: ExitReason | null = null;
 
-      // Stop loss
+      // Stop loss (account for gaps: if open is below stop, fill at open)
       if (c.low <= stopLoss) {
-        exitPrice = stopLoss;
+        exitPrice = c.open <= stopLoss ? c.open : stopLoss;
         exitReason = 'stop_loss';
       }
-      // Trailing stop
+      // Trailing stop (account for gaps)
       else if (trailActive && c.low <= trailStop) {
-        exitPrice = trailStop;
+        exitPrice = c.open <= trailStop ? c.open : trailStop;
         exitReason = 'trailing_stop';
       }
       // Timeout
@@ -137,7 +137,6 @@ export function runBacktest(candles: Candle[], cfg: Config): BacktestResult {
     if (!inPosition && !hasPending && i >= cooldownUntil && capital > 0) {
       const signal = checkSignal(candles, ind, i, cfg);
       if (signal && signal.confidence >= cfg.minConfidence) {
-        pendingStop = signal.stopLoss;
         pendingAtr = signal.atr;
         hasPending = true;
       }

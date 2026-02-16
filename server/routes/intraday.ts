@@ -19,9 +19,9 @@ export const intradayRouter = Router();
 let lastResult: BacktestResult | null = null;
 
 // GET /api/intraday/live-signal
-intradayRouter.get('/live-signal', async (_req, res) => {
+intradayRouter.get('/live-signal', (_req, res) => {
   try {
-    const result = await scanLiveSignal();
+    const result = scanLiveSignal();
     res.json({ success: true, ...result });
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Unknown error';
@@ -31,13 +31,13 @@ intradayRouter.get('/live-signal', async (_req, res) => {
 });
 
 // POST /api/intraday/backtest
-intradayRouter.post('/backtest', async (req, res) => {
+intradayRouter.post('/backtest', (_req, res) => {
   try {
-    const overrides = req.body ?? {};
+    const overrides = _req.body ?? {};
     const cfg: Config = { ...DEFAULT_CONFIG, ...overrides };
     console.log(`[intraday] Backtest: ${cfg.interval}, ${cfg.lookbackDays}d, SL=${cfg.slAtrMultiple}xATR`);
 
-    const candles = await fetchCandles(cfg.lookbackDays, cfg.interval);
+    const candles = fetchCandles(cfg.lookbackDays, cfg.interval);
     if (candles.length < 220) {
       throw new Error(`Not enough candles: ${candles.length} (need 220+)`);
     }
