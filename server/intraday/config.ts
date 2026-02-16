@@ -1,12 +1,14 @@
 /**
- * Config — LONG only, single 1H timeframe, 3 strategies.
+ * Config — LONG only, 3 strategies, multiple timeframes.
  */
+
+import type { Interval } from './data-fetcher.js';
 
 export type StrategyType = 'pullback' | 'breakout' | 'momentum';
 
 export interface Config {
   symbol: string;
-  interval: '1h';
+  interval: Interval;
   strategy: StrategyType;
 
   // EMAs

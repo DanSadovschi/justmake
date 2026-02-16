@@ -1,18 +1,20 @@
 /**
  * Data Fetcher — Binance public API (no key needed).
- * Fetches BTC/USDT hourly klines.
+ * Fetches BTC/USDT klines for any interval.
  */
 
 import type { Candle } from './types.js';
 
 const BINANCE_LIMIT = 1000;
 
+export type Interval = '15m' | '1h' | '4h';
+
 function sleep(ms: number): Promise<void> {
   return new Promise(r => setTimeout(r, ms));
 }
 
-async function fetchPage(startTime: number, endTime: number): Promise<Candle[]> {
-  const url = `https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1h&startTime=${startTime}&endTime=${endTime}&limit=${BINANCE_LIMIT}`;
+async function fetchPage(interval: Interval, startTime: number, endTime: number): Promise<Candle[]> {
+  const url = `https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=${interval}&startTime=${startTime}&endTime=${endTime}&limit=${BINANCE_LIMIT}`;
 
   for (let attempt = 0; attempt < 3; attempt++) {
     const res = await fetch(url);
@@ -40,23 +42,24 @@ async function fetchPage(startTime: number, endTime: number): Promise<Candle[]> 
 }
 
 /**
- * Fetch BTC/USDT hourly candles from Binance.
+ * Fetch BTC/USDT candles from Binance.
  * Paginates forward from startTime.
  */
 export async function fetchCandles(
   lookbackDays: number,
+  interval: Interval = '1h',
 ): Promise<Candle[]> {
   const now = Date.now();
   const startMs = now - lookbackDays * 86_400_000;
   const all: Candle[] = [];
   let cursor = startMs;
 
-  console.log(`[data] Fetching BTCUSDT 1H from Binance (${lookbackDays} days)...`);
+  console.log(`[data] Fetching BTCUSDT ${interval} from Binance (${lookbackDays} days)...`);
 
   for (let p = 0; p < 50; p++) {
     if (p > 0) await sleep(300);
 
-    const batch = await fetchPage(cursor, now);
+    const batch = await fetchPage(interval, cursor, now);
     if (batch.length === 0) break;
 
     all.push(...batch);
@@ -72,6 +75,6 @@ export async function fetchCandles(
     .filter(c => { if (seen.has(c.openTime)) return false; seen.add(c.openTime); return true; })
     .sort((a, b) => a.openTime - b.openTime);
 
-  console.log(`[data] Got ${candles.length} hourly candles`);
+  console.log(`[data] Got ${candles.length} ${interval} candles`);
   return candles;
 }

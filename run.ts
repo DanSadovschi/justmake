@@ -88,7 +88,7 @@ async function main() {
   printConfig(cfg);
 
   console.log('\nFetching data...');
-  const candles = await fetchCandles(cfg.lookbackDays);
+  const candles = await fetchCandles(cfg.lookbackDays, cfg.interval);
 
   if (candles.length < 220) {
     console.error(`Not enough candles: ${candles.length} (need 220+)`);

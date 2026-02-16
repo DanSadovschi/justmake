@@ -1,17 +1,19 @@
 /**
- * Parameter Grid Search — tests all 3 strategies with parameter combos.
+ * Multi-timeframe, multi-strategy parameter grid search.
  * Run: npx tsx optimize.ts [lookbackDays]
+ *
+ * Tests 15m, 1h, 4h × breakout/momentum/pullback × param grid.
  */
 
 import { DEFAULT_CONFIG, type Config, type StrategyType } from './server/intraday/config.js';
-import { fetchCandles } from './server/intraday/data-fetcher.js';
+import { fetchCandles, type Interval } from './server/intraday/data-fetcher.js';
 import { runBacktest } from './server/intraday/backtest.js';
-import type { Metrics } from './server/intraday/types.js';
+import type { Candle, Metrics } from './server/intraday/types.js';
 
-// ── Parameter grids per strategy ──
+const INTERVALS: Interval[] = ['15m', '1h', '4h'];
 const STRATEGIES: StrategyType[] = ['breakout', 'momentum', 'pullback'];
 
-// Shared params for all strategies
+// Shared params
 const SHARED = {
   slAtrMultiple:    [2.0, 2.5, 3.0],
   trailActivateR:   [1.5, 2.0, 2.5],
@@ -20,14 +22,13 @@ const SHARED = {
   rsiMax:           [60, 65, 70],
 };
 
-// Strategy-specific params
+// Strategy-specific
 const SPECIFIC: Record<StrategyType, Record<string, number[]>> = {
   breakout: {
     breakoutPeriod:  [10, 15, 20, 30],
     breakoutVolMult: [1.0, 1.2, 1.5],
   },
   momentum: {
-    // Momentum uses fewer specific params — test EMA combos
     emaFast: [10, 20],
     emaSlow: [30, 50],
   },
@@ -38,6 +39,7 @@ const SPECIFIC: Record<StrategyType, Record<string, number[]>> = {
 };
 
 interface Result {
+  interval: Interval;
   strategy: StrategyType;
   params: Record<string, number | string>;
   metrics: Metrics;
@@ -58,7 +60,6 @@ function* combos(grid: Record<string, number[]>): Generator<Record<string, numbe
   const keys = Object.keys(grid);
   const values = keys.map(k => grid[k]);
   const total = values.reduce((a, v) => a * v.length, 1);
-
   for (let i = 0; i < total; i++) {
     const combo: Record<string, number> = {};
     let idx = i;
@@ -72,48 +73,65 @@ function* combos(grid: Record<string, number[]>): Generator<Record<string, numbe
 
 async function main() {
   const lookback = Number(process.argv[2]) || 365;
-  console.log(`Fetching ${lookback}d of data...\n`);
-  const candles = await fetchCandles(lookback);
-  console.log(`\nGot ${candles.length} candles.\n`);
+
+  // Fetch all timeframes upfront
+  const candlesByInterval = new Map<Interval, Candle[]>();
+  for (const interval of INTERVALS) {
+    console.log('');
+    const candles = await fetchCandles(lookback, interval);
+    candlesByInterval.set(interval, candles);
+  }
+
+  console.log('\n── Starting grid search ──\n');
 
   const results: Result[] = [];
   let totalTested = 0;
 
-  for (const strategy of STRATEGIES) {
-    const grid = { ...SHARED, ...SPECIFIC[strategy] };
-    const allCombos = [...combos(grid)];
-    console.log(`[${strategy}] Testing ${allCombos.length} combinations...`);
+  for (const interval of INTERVALS) {
+    const candles = candlesByInterval.get(interval)!;
+    if (candles.length < 220) {
+      console.log(`[${interval}] Only ${candles.length} candles — skipping (need 220+)`);
+      continue;
+    }
 
-    for (const params of allCombos) {
-      const cfg: Config = { ...DEFAULT_CONFIG, strategy, ...params } as Config;
-      const result = runBacktest(candles, cfg);
-      const s = score(result.metrics);
-      results.push({ strategy, params: { strategy, ...params }, metrics: result.metrics, score: s });
-      totalTested++;
+    for (const strategy of STRATEGIES) {
+      const grid = { ...SHARED, ...SPECIFIC[strategy] };
+      const allCombos = [...combos(grid)];
+      console.log(`[${interval}/${strategy}] ${allCombos.length} combos...`);
+
+      for (const params of allCombos) {
+        const cfg: Config = { ...DEFAULT_CONFIG, interval, strategy, ...params } as Config;
+        const result = runBacktest(candles, cfg);
+        const s = score(result.metrics);
+        results.push({
+          interval,
+          strategy,
+          params: { interval, strategy, ...params },
+          metrics: result.metrics,
+          score: s,
+        });
+        totalTested++;
+      }
     }
   }
 
   console.log(`\nTotal: ${totalTested} combinations tested.\n`);
 
-  // Sort by score
   results.sort((a, b) => b.score - a.score);
 
-  // Print top 20
+  // Top 25
   console.log('══════════════════════════════════════════════════════════════════════════════════');
-  console.log('  TOP 20 — ALL STRATEGIES COMPARED');
+  console.log('  TOP 25 — ALL TIMEFRAMES × ALL STRATEGIES');
   console.log('══════════════════════════════════════════════════════════════════════════════════\n');
 
-  const top = results.slice(0, 20);
+  const top = results.slice(0, 25);
   for (let i = 0; i < top.length; i++) {
     const r = top[i];
     const m = r.metrics;
-    const strat = String(r.strategy).toUpperCase().padEnd(10);
-    console.log(`  #${String(i + 1).padStart(2)}  [${strat}]  Score: ${r.score.toFixed(1).padStart(6)}  |  Return: ${m.totalReturnPct}%  PF: ${m.profitFactor}  WR: ${m.winRate}%  DD: ${m.maxDrawdownPct}%  Trades: ${m.totalTrades}  AvgR: ${m.avgRMultiple}`);
-
-    // Print params compactly
-    const p = r.params;
-    const paramStr = Object.entries(p)
-      .filter(([k]) => k !== 'strategy')
+    const label = `${r.interval}/${r.strategy}`.toUpperCase().padEnd(16);
+    console.log(`  #${String(i + 1).padStart(2)}  [${label}]  Score: ${r.score.toFixed(1).padStart(6)}  |  Ret: ${m.totalReturnPct}%  PF: ${m.profitFactor}  WR: ${m.winRate}%  DD: ${m.maxDrawdownPct}%  Trades: ${m.totalTrades}  AvgR: ${m.avgRMultiple}`);
+    const paramStr = Object.entries(r.params)
+      .filter(([k]) => k !== 'strategy' && k !== 'interval')
       .map(([k, v]) => `${k}=${v}`)
       .join('  ');
     console.log(`        ${paramStr}`);
@@ -121,16 +139,31 @@ async function main() {
     console.log('');
   }
 
-  // Best per strategy
+  // Best per interval
   console.log('══════════════════════════════════════════════════════════════════════════════════');
-  console.log('  BEST PER STRATEGY');
+  console.log('  BEST PER TIMEFRAME');
+  console.log('══════════════════════════════════════════════════════════════════════════════════\n');
+
+  for (const interval of INTERVALS) {
+    const best = results.find(r => r.interval === interval && r.score > -999);
+    if (!best) { console.log(`  [${interval}] No valid results\n`); continue; }
+    const m = best.metrics;
+    console.log(`  [${interval.toUpperCase()} / ${best.strategy.toUpperCase()}]  Ret: ${m.totalReturnPct}%  PF: ${m.profitFactor}  WR: ${m.winRate}%  DD: ${m.maxDrawdownPct}%  Trades: ${m.totalTrades}  AvgR: ${m.avgRMultiple}`);
+    const args = Object.entries(best.params).map(([k, v]) => `--${k}=${v}`).join(' ');
+    console.log(`  Run:  npx tsx run.ts ${args}`);
+    console.log('');
+  }
+
+  // Best per strategy (across all timeframes)
+  console.log('══════════════════════════════════════════════════════════════════════════════════');
+  console.log('  BEST PER STRATEGY (any timeframe)');
   console.log('══════════════════════════════════════════════════════════════════════════════════\n');
 
   for (const strategy of STRATEGIES) {
-    const best = results.find(r => r.strategy === strategy);
+    const best = results.find(r => r.strategy === strategy && r.score > -999);
     if (!best) continue;
     const m = best.metrics;
-    console.log(`  [${strategy.toUpperCase()}]  Return: ${m.totalReturnPct}%  PF: ${m.profitFactor}  WR: ${m.winRate}%  DD: ${m.maxDrawdownPct}%  Trades: ${m.totalTrades}  AvgR: ${m.avgRMultiple}`);
+    console.log(`  [${best.interval.toUpperCase()} / ${strategy.toUpperCase()}]  Ret: ${m.totalReturnPct}%  PF: ${m.profitFactor}  WR: ${m.winRate}%  DD: ${m.maxDrawdownPct}%  Trades: ${m.totalTrades}  AvgR: ${m.avgRMultiple}`);
     const args = Object.entries(best.params).map(([k, v]) => `--${k}=${v}`).join(' ');
     console.log(`  Run:  npx tsx run.ts ${args}`);
     console.log('');
