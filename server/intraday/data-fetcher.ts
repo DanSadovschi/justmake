@@ -56,7 +56,8 @@ export async function fetchCandles(
 
   console.log(`[data] Fetching BTCUSDT ${interval} from Binance (${lookbackDays} days)...`);
 
-  for (let p = 0; p < 50; p++) {
+  const maxPages = 200; // 200 × 1000 = 200K candles (enough for 4yr of 15m)
+  for (let p = 0; p < maxPages; p++) {
     if (p > 0) await sleep(300);
 
     const batch = await fetchPage(interval, cursor, now);

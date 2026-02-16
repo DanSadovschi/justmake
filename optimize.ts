@@ -3,12 +3,13 @@
  * Run: npx tsx optimize.ts [lookbackDays]
  *
  * Tests 15m, 1h, 4h × breakout/momentum/pullback × param grid.
+ * Includes per-year breakdown to detect regime dependence.
  */
 
 import { DEFAULT_CONFIG, type Config, type StrategyType } from './server/intraday/config.js';
 import { fetchCandles, type Interval } from './server/intraday/data-fetcher.js';
 import { runBacktest } from './server/intraday/backtest.js';
-import type { Candle, Metrics } from './server/intraday/types.js';
+import type { Candle, Metrics, Trade } from './server/intraday/types.js';
 
 const INTERVALS: Interval[] = ['15m', '1h', '4h'];
 const STRATEGIES: StrategyType[] = ['breakout', 'momentum', 'pullback'];
@@ -43,6 +44,7 @@ interface Result {
   strategy: StrategyType;
   params: Record<string, number | string>;
   metrics: Metrics;
+  trades: Trade[];
   score: number;
 }
 
@@ -69,6 +71,28 @@ function* combos(grid: Record<string, number[]>): Generator<Record<string, numbe
     }
     yield combo;
   }
+}
+
+function rd(v: number): number {
+  return Math.round(v * 100) / 100;
+}
+
+function yearBreakdown(trades: Trade[]): Map<number, { trades: number; wins: number; pnl: number; avgR: number }> {
+  const byYear = new Map<number, Trade[]>();
+  for (const t of trades) {
+    const year = new Date(t.entryTime).getFullYear();
+    if (!byYear.has(year)) byYear.set(year, []);
+    byYear.get(year)!.push(t);
+  }
+
+  const result = new Map<number, { trades: number; wins: number; pnl: number; avgR: number }>();
+  for (const [year, yTrades] of [...byYear.entries()].sort((a, b) => a[0] - b[0])) {
+    const wins = yTrades.filter(t => t.pnl > 0).length;
+    const pnl = yTrades.reduce((s, t) => s + t.pnl, 0);
+    const avgR = yTrades.reduce((s, t) => s + t.rMultiple, 0) / yTrades.length;
+    result.set(year, { trades: yTrades.length, wins, pnl: rd(pnl), avgR: rd(avgR) });
+  }
+  return result;
 }
 
 async function main() {
@@ -108,6 +132,7 @@ async function main() {
           strategy,
           params: { interval, strategy, ...params },
           metrics: result.metrics,
+          trades: result.trades,
           score: s,
         });
         totalTested++;
@@ -119,12 +144,12 @@ async function main() {
 
   results.sort((a, b) => b.score - a.score);
 
-  // Top 25
+  // Top 15 with per-year breakdown
   console.log('══════════════════════════════════════════════════════════════════════════════════');
-  console.log('  TOP 25 — ALL TIMEFRAMES × ALL STRATEGIES');
+  console.log('  TOP 15 — WITH PER-YEAR BREAKDOWN');
   console.log('══════════════════════════════════════════════════════════════════════════════════\n');
 
-  const top = results.slice(0, 25);
+  const top = results.slice(0, 15);
   for (let i = 0; i < top.length; i++) {
     const r = top[i];
     const m = r.metrics;
@@ -135,13 +160,22 @@ async function main() {
       .map(([k, v]) => `${k}=${v}`)
       .join('  ');
     console.log(`        ${paramStr}`);
-    console.log(`        Exits: SL=${m.exitReasons['stop_loss'] ?? 0} Trail=${m.exitReasons['trailing_stop'] ?? 0} Timeout=${m.exitReasons['timeout'] ?? 0}`);
+
+    // Per-year breakdown
+    const years = yearBreakdown(r.trades);
+    const yearParts: string[] = [];
+    for (const [year, s] of years) {
+      const wr = s.trades > 0 ? Math.round((s.wins / s.trades) * 100) : 0;
+      const sign = s.pnl >= 0 ? '+' : '';
+      yearParts.push(`${year}: ${s.trades}T ${wr}%WR ${sign}$${s.pnl} avgR=${s.avgR}`);
+    }
+    console.log(`        ${yearParts.join('  |  ')}`);
     console.log('');
   }
 
-  // Best per interval
+  // Best per interval with year breakdown
   console.log('══════════════════════════════════════════════════════════════════════════════════');
-  console.log('  BEST PER TIMEFRAME');
+  console.log('  BEST PER TIMEFRAME — WITH PER-YEAR BREAKDOWN');
   console.log('══════════════════════════════════════════════════════════════════════════════════\n');
 
   for (const interval of INTERVALS) {
@@ -151,10 +185,17 @@ async function main() {
     console.log(`  [${interval.toUpperCase()} / ${best.strategy.toUpperCase()}]  Ret: ${m.totalReturnPct}%  PF: ${m.profitFactor}  WR: ${m.winRate}%  DD: ${m.maxDrawdownPct}%  Trades: ${m.totalTrades}  AvgR: ${m.avgRMultiple}`);
     const args = Object.entries(best.params).map(([k, v]) => `--${k}=${v}`).join(' ');
     console.log(`  Run:  npx tsx run.ts ${args}`);
+
+    const years = yearBreakdown(best.trades);
+    for (const [year, s] of years) {
+      const wr = s.trades > 0 ? Math.round((s.wins / s.trades) * 100) : 0;
+      const sign = s.pnl >= 0 ? '+' : '';
+      console.log(`    ${year}:  ${String(s.trades).padStart(3)} trades  WR ${String(wr).padStart(2)}%  PnL ${sign}$${s.pnl}  avgR ${s.avgR}`);
+    }
     console.log('');
   }
 
-  // Best per strategy (across all timeframes)
+  // Best per strategy
   console.log('══════════════════════════════════════════════════════════════════════════════════');
   console.log('  BEST PER STRATEGY (any timeframe)');
   console.log('══════════════════════════════════════════════════════════════════════════════════\n');
@@ -166,6 +207,13 @@ async function main() {
     console.log(`  [${best.interval.toUpperCase()} / ${strategy.toUpperCase()}]  Ret: ${m.totalReturnPct}%  PF: ${m.profitFactor}  WR: ${m.winRate}%  DD: ${m.maxDrawdownPct}%  Trades: ${m.totalTrades}  AvgR: ${m.avgRMultiple}`);
     const args = Object.entries(best.params).map(([k, v]) => `--${k}=${v}`).join(' ');
     console.log(`  Run:  npx tsx run.ts ${args}`);
+
+    const years = yearBreakdown(best.trades);
+    for (const [year, s] of years) {
+      const wr = s.trades > 0 ? Math.round((s.wins / s.trades) * 100) : 0;
+      const sign = s.pnl >= 0 ? '+' : '';
+      console.log(`    ${year}:  ${String(s.trades).padStart(3)} trades  WR ${String(wr).padStart(2)}%  PnL ${sign}$${s.pnl}  avgR ${s.avgR}`);
+    }
     console.log('');
   }
 }
