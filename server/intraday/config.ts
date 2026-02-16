@@ -4,7 +4,7 @@
 
 import type { Interval } from './data-fetcher.js';
 
-export type StrategyType = 'pullback' | 'breakout' | 'momentum';
+export type StrategyType = 'pullback' | 'breakout' | 'momentum' | 'momentum_adx' | 'macd_zero' | 'bband_squeeze' | 'scoring';
 
 export interface Config {
   symbol: string;
@@ -31,6 +31,28 @@ export interface Config {
   // Breakout-specific
   breakoutPeriod: number; // 20 — lookback for highest high
   breakoutVolMult: number; // 1.2 — min volume vs SMA
+
+  // ADX
+  adxPeriod: number;      // 14
+  adxThreshold: number;   // 25 — min ADX for trend strength
+
+  // MACD
+  macdFast: number;       // 12
+  macdSlow: number;       // 26
+  macdSignalPeriod: number; // 9
+
+  // Bollinger
+  bbPeriod: number;       // 20
+  bbStdDev: number;       // 2
+  bbSqueezePctile: number; // 15 — bandwidth percentile for squeeze
+
+  // EMA200 filter
+  useEma200Filter: boolean; // true — toggle trend regime filter
+
+  // Scoring strategy
+  scoreThreshold: number;  // 3 — min factors required (out of 5)
+  minAtrPct: number;       // 0.3 — min ATR as % of price
+  maxAtrPct: number;       // 3.0 — max ATR as % of price
 
   // Risk
   riskPerTrade: number;   // 0.01 = 1%
@@ -73,6 +95,23 @@ export const DEFAULT_CONFIG: Config = {
 
   breakoutPeriod: 20,
   breakoutVolMult: 1.2,
+
+  adxPeriod: 14,
+  adxThreshold: 25,
+
+  macdFast: 12,
+  macdSlow: 26,
+  macdSignalPeriod: 9,
+
+  bbPeriod: 20,
+  bbStdDev: 2,
+  bbSqueezePctile: 15,
+
+  useEma200Filter: true,
+
+  scoreThreshold: 3,
+  minAtrPct: 0.3,
+  maxAtrPct: 3.0,
 
   riskPerTrade: 0.01,
   minRiskReward: 2.0,

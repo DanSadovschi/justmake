@@ -2,19 +2,22 @@
  * Multi-timeframe, multi-strategy parameter grid search.
  * Run: npx tsx optimize.ts [lookbackDays]
  *
- * Tests 15m, 1h, 4h × breakout/momentum/pullback × param grid.
- * Includes per-year breakdown to detect regime dependence.
+ * Tests 15m, 1h, 4h × 6 strategies × param grid.
+ * Includes per-year breakdown, stability analysis, EMA200 A/B test.
+ *
+ * Scoring: conservative — penalizes drawdown, rewards trade count logarithmically.
+ *   score = (ReturnPct / max(1, MaxDDPct)) * ln(1 + trades)
  */
 
 import { DEFAULT_CONFIG, type Config, type StrategyType } from './server/intraday/config.js';
 import { fetchCandles, type Interval } from './server/intraday/data-fetcher.js';
-import { runBacktest } from './server/intraday/backtest.js';
+import { runBacktest, computeIndicators } from './server/intraday/backtest.js';
 import type { Candle, Metrics, Trade } from './server/intraday/types.js';
 
 const INTERVALS: Interval[] = ['15m', '1h', '4h'];
-const STRATEGIES: StrategyType[] = ['breakout', 'momentum', 'pullback'];
+const STRATEGIES: StrategyType[] = ['breakout', 'momentum', 'pullback', 'momentum_adx', 'macd_zero', 'bband_squeeze', 'scoring'];
 
-// Shared params
+// Shared params (all strategies)
 const SHARED = {
   slAtrMultiple:    [2.0, 2.5, 3.0],
   trailActivateR:   [1.5, 2.0, 2.5],
@@ -23,7 +26,7 @@ const SHARED = {
   rsiMax:           [60, 65, 70],
 };
 
-// Strategy-specific
+// Strategy-specific — kept small per instructions
 const SPECIFIC: Record<StrategyType, Record<string, number[]>> = {
   breakout: {
     breakoutPeriod:  [10, 15, 20, 30],
@@ -37,6 +40,23 @@ const SPECIFIC: Record<StrategyType, Record<string, number[]>> = {
     pullbackMaxPct: [1.5, 2.0, 2.5],
     rsiMin:         [30, 35, 40],
   },
+  momentum_adx: {
+    emaFast:       [10, 20],
+    emaSlow:       [30, 50],
+    adxThreshold:  [20, 25, 30],
+  },
+  macd_zero: {
+    macdFast: [10, 12],
+    macdSlow: [24, 26],
+  },
+  bband_squeeze: {
+    bbSqueezePctile: [10, 15, 20],
+  },
+  scoring: {
+    scoreThreshold: [3, 4],
+    adxThreshold:   [20, 25],
+    breakoutPeriod:  [10, 20],
+  },
 };
 
 interface Result {
@@ -48,14 +68,13 @@ interface Result {
   score: number;
 }
 
+// ── Conservative scoring ──
+// Penalizes drawdown via division (not subtraction).
+// Rewards trade count logarithmically to avoid rewarding overtrading.
 function score(m: Metrics): number {
   if (m.totalTrades < 10) return -999;
-  return (
-    m.totalReturnPct * 0.4 +
-    m.profitFactor * 20 +
-    m.avgRMultiple * 30 -
-    m.maxDrawdownPct * 0.3
-  );
+  const dd = Math.max(1, m.maxDrawdownPct);
+  return (m.totalReturnPct / dd) * Math.log(1 + m.totalTrades);
 }
 
 function* combos(grid: Record<string, number[]>): Generator<Record<string, number>> {
@@ -93,6 +112,139 @@ function yearBreakdown(trades: Trade[]): Map<number, { trades: number; wins: num
     result.set(year, { trades: yTrades.length, wins, pnl: rd(pnl), avgR: rd(avgR) });
   }
   return result;
+}
+
+// ── Warnings ──
+
+function getWarnings(m: Metrics): string[] {
+  const w: string[] = [];
+  if (m.profitFactor > 4 && m.totalTrades < 20)
+    w.push('HIGH PF + LOW SAMPLE');
+  if (m.totalTrades < 15)
+    w.push('LOW SAMPLE');
+  if (m.maxDrawdownPct > 10)
+    w.push('HIGH DD');
+  return w;
+}
+
+// ── Multi-year robustness check ──
+
+function multiYearCheck(trades: Trade[]): { profitYears: number; totalYears: number; bearOk: boolean } {
+  const years = yearBreakdown(trades);
+  let profitYears = 0;
+  let totalYears = 0;
+  let bearOk = true;
+
+  for (const [year, data] of years) {
+    totalYears++;
+    if (data.pnl > 0) profitYears++;
+    // 2022 bear: loss > 5% of initial capital is a red flag
+    if (year === 2022 && data.pnl < -500) bearOk = false;
+  }
+
+  return { profitYears, totalYears, bearOk };
+}
+
+// ── Factor hit-rate for scoring strategy ──
+
+function scoringFactorHitRate(
+  candles: Candle[],
+  cfg: Config,
+  trades: Trade[],
+): Record<string, number> | null {
+  if (cfg.strategy !== 'scoring' || trades.length === 0) return null;
+  const ind = computeIndicators(candles, cfg);
+  const hits = { A_trend: 0, B_adx: 0, C_rsi: 0, D_breakout: 0, E_atrPct: 0 };
+  let matched = 0;
+
+  for (const t of trades) {
+    // Find entry candle, signal was on the bar before
+    let sigIdx = -1;
+    for (let i = 1; i < candles.length; i++) {
+      if (candles[i].openTime === t.entryTime) { sigIdx = i - 1; break; }
+    }
+    if (sigIdx < cfg.breakoutPeriod) continue;
+    matched++;
+
+    if (ind.ema20[sigIdx] > ind.ema50[sigIdx]) hits.A_trend++;
+    if (ind.adx[sigIdx] >= cfg.adxThreshold) hits.B_adx++;
+    if (ind.rsi14[sigIdx] < cfg.rsiMax) hits.C_rsi++;
+
+    let hh = -Infinity;
+    for (let j = sigIdx - cfg.breakoutPeriod; j < sigIdx; j++) {
+      if (candles[j].high > hh) hh = candles[j].high;
+    }
+    if (candles[sigIdx].close > hh) hits.D_breakout++;
+
+    const atrPct = ind.atr14[sigIdx] > 0 ? (ind.atr14[sigIdx] / candles[sigIdx].close) * 100 : 0;
+    if (atrPct >= cfg.minAtrPct && atrPct <= cfg.maxAtrPct) hits.E_atrPct++;
+  }
+
+  if (matched === 0) return null;
+  return {
+    A_trend: rd((hits.A_trend / matched) * 100),
+    B_adx: rd((hits.B_adx / matched) * 100),
+    C_rsi: rd((hits.C_rsi / matched) * 100),
+    D_breakout: rd((hits.D_breakout / matched) * 100),
+    E_atrPct: rd((hits.E_atrPct / matched) * 100),
+  };
+}
+
+// ── Stability check ──
+// For each top result, check if ±1 step neighbors in parameter space
+// have scores within 70% of the top. Dense neighborhood = stable.
+
+function makeKey(interval: Interval, strategy: StrategyType, numericParams: Record<string, number>): string {
+  const p = Object.entries(numericParams)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([k, v]) => `${k}=${v}`)
+    .join(',');
+  return `${interval}|${strategy}|${p}`;
+}
+
+function checkStability(
+  r: Result,
+  lookup: Map<string, number>,
+  allResults: Result[],
+): 'STABLE' | 'MODERATE' | 'UNSTABLE' {
+  const grid: Record<string, number[]> = { ...SHARED, ...SPECIFIC[r.strategy] };
+  const numericParams: Record<string, number> = {};
+  for (const [k, v] of Object.entries(r.params)) {
+    if (k !== 'interval' && k !== 'strategy' && typeof v === 'number') {
+      numericParams[k] = v;
+    }
+  }
+
+  let totalNeighbors = 0;
+  let stableNeighbors = 0;
+
+  for (const [paramName, gridValues] of Object.entries(grid)) {
+    const currentVal = numericParams[paramName];
+    if (currentVal === undefined) continue;
+    const currentIdx = gridValues.indexOf(currentVal);
+    if (currentIdx < 0) continue;
+
+    for (const delta of [-1, 1]) {
+      const nIdx = currentIdx + delta;
+      if (nIdx < 0 || nIdx >= gridValues.length) continue;
+
+      const neighborParams = { ...numericParams, [paramName]: gridValues[nIdx] };
+      const key = makeKey(r.interval, r.strategy, neighborParams);
+      const resultIdx = lookup.get(key);
+
+      totalNeighbors++;
+      if (resultIdx !== undefined) {
+        const neighborScore = allResults[resultIdx].score;
+        if (neighborScore >= r.score * 0.7) stableNeighbors++;
+      }
+    }
+  }
+
+  if (totalNeighbors === 0) return 'UNSTABLE';
+  const ratio = stableNeighbors / totalNeighbors;
+  if (ratio >= 0.6) return 'STABLE';
+  if (ratio >= 0.3) return 'MODERATE';
+  return 'UNSTABLE';
 }
 
 async function main() {
@@ -144,24 +296,55 @@ async function main() {
 
   results.sort((a, b) => b.score - a.score);
 
-  // Top 15 with per-year breakdown
+  // Build lookup for stability analysis
+  const lookup = new Map<string, number>();
+  for (let i = 0; i < results.length; i++) {
+    const r = results[i];
+    const numericParams: Record<string, number> = {};
+    for (const [k, v] of Object.entries(r.params)) {
+      if (k !== 'interval' && k !== 'strategy' && typeof v === 'number') {
+        numericParams[k] = v;
+      }
+    }
+    lookup.set(makeKey(r.interval, r.strategy, numericParams), i);
+  }
+
+  // ════════════════════════════════════════════════════════
+  // TOP 15 with stability, warnings, multi-year check
+  // ════════════════════════════════════════════════════════
   console.log('══════════════════════════════════════════════════════════════════════════════════');
   console.log('  TOP 15 — WITH PER-YEAR BREAKDOWN');
+  console.log('  Scoring: (Return% / max(1,DD%)) × ln(1+trades)  — conservative, DD-penalized');
   console.log('══════════════════════════════════════════════════════════════════════════════════\n');
 
-  const top = results.slice(0, 15);
+  const top = results.filter(r => r.score > -999).slice(0, 15);
   for (let i = 0; i < top.length; i++) {
     const r = top[i];
     const m = r.metrics;
-    const label = `${r.interval}/${r.strategy}`.toUpperCase().padEnd(16);
-    console.log(`  #${String(i + 1).padStart(2)}  [${label}]  Score: ${r.score.toFixed(1).padStart(6)}  |  Ret: ${m.totalReturnPct}%  PF: ${m.profitFactor}  WR: ${m.winRate}%  DD: ${m.maxDrawdownPct}%  Trades: ${m.totalTrades}  AvgR: ${m.avgRMultiple}`);
+    const label = `${r.interval}/${r.strategy}`.toUpperCase().padEnd(20);
+    const stability = checkStability(r, lookup, results);
+    const warnings = getWarnings(m);
+    const myc = multiYearCheck(r.trades);
+    const yearTag = `${myc.profitYears}/${myc.totalYears}yr+`;
+    const bearTag = myc.bearOk ? '' : ' BEAR-RISK';
+
+    let flags = `[${stability}] [${yearTag}]`;
+    if (bearTag) flags += bearTag;
+    if (warnings.length > 0) flags += '  !! ' + warnings.join(', ');
+
+    console.log(
+      `  #${String(i + 1).padStart(2)}  [${label}]  Score: ${r.score.toFixed(1).padStart(6)}  |  ` +
+      `Ret: ${m.totalReturnPct}%  PF: ${m.profitFactor}  WR: ${m.winRate}%  DD: ${m.maxDrawdownPct}%  ` +
+      `Trades: ${m.totalTrades}  AvgR: ${m.avgRMultiple}`,
+    );
+    console.log(`        ${flags}`);
+
     const paramStr = Object.entries(r.params)
       .filter(([k]) => k !== 'strategy' && k !== 'interval')
       .map(([k, v]) => `${k}=${v}`)
       .join('  ');
     console.log(`        ${paramStr}`);
 
-    // Per-year breakdown
     const years = yearBreakdown(r.trades);
     const yearParts: string[] = [];
     for (const [year, s] of years) {
@@ -170,10 +353,87 @@ async function main() {
       yearParts.push(`${year}: ${s.trades}T ${wr}%WR ${sign}$${s.pnl} avgR=${s.avgR}`);
     }
     console.log(`        ${yearParts.join('  |  ')}`);
+
+    // Factor hit-rate for scoring strategy
+    if (r.strategy === 'scoring') {
+      const candles = candlesByInterval.get(r.interval)!;
+      const numP: Record<string, number> = {};
+      for (const [k, v] of Object.entries(r.params)) {
+        if (k !== 'interval' && k !== 'strategy' && typeof v === 'number') numP[k] = v;
+      }
+      const cfgForHit: Config = { ...DEFAULT_CONFIG, interval: r.interval, strategy: r.strategy, ...numP } as Config;
+      const hitRates = scoringFactorHitRate(candles, cfgForHit, r.trades);
+      if (hitRates) {
+        const parts = Object.entries(hitRates).map(([k, v]) => `${k}:${v}%`).join('  ');
+        console.log(`        Factors at entry: ${parts}`);
+      }
+    }
+
     console.log('');
   }
 
+  // ════════════════════════════════════════════════════════
+  // EMA200 FILTER A/B TEST (top 5 unique strategy+interval combos)
+  // ════════════════════════════════════════════════════════
+  console.log('══════════════════════════════════════════════════════════════════════════════════');
+  console.log('  EMA200 FILTER A/B TEST');
+  console.log('  For each top config: compare WITH vs WITHOUT EMA200 trend filter');
+  console.log('══════════════════════════════════════════════════════════════════════════════════\n');
+
+  const abSeen = new Set<string>();
+  let abCount = 0;
+  for (const r of top) {
+    if (abCount >= 5) break;
+    const key = `${r.interval}|${r.strategy}`;
+    if (abSeen.has(key)) continue;
+    abSeen.add(key);
+    abCount++;
+
+    const candles = candlesByInterval.get(r.interval)!;
+    const numericParams: Record<string, number> = {};
+    for (const [k, v] of Object.entries(r.params)) {
+      if (k !== 'interval' && k !== 'strategy' && typeof v === 'number') {
+        numericParams[k] = v;
+      }
+    }
+
+    // Run without EMA200 filter
+    const cfgNoFilter: Config = {
+      ...DEFAULT_CONFIG,
+      interval: r.interval,
+      strategy: r.strategy,
+      ...numericParams,
+      useEma200Filter: false,
+    } as Config;
+    const noFilterResult = runBacktest(candles, cfgNoFilter);
+    const mWith = r.metrics;
+    const mWithout = noFilterResult.metrics;
+
+    const label = `${r.interval}/${r.strategy}`.toUpperCase();
+    console.log(`  ${label}`);
+    console.log(`    WITH EMA200:    Ret: ${mWith.totalReturnPct}%  PF: ${mWith.profitFactor}  DD: ${mWith.maxDrawdownPct}%  Trades: ${mWith.totalTrades}  WR: ${mWith.winRate}%`);
+    console.log(`    WITHOUT EMA200: Ret: ${mWithout.totalReturnPct}%  PF: ${mWithout.profitFactor}  DD: ${mWithout.maxDrawdownPct}%  Trades: ${mWithout.totalTrades}  WR: ${mWithout.winRate}%`);
+
+    const dRet = rd(mWithout.totalReturnPct - mWith.totalReturnPct);
+    const dPF = rd(mWithout.profitFactor - mWith.profitFactor);
+    const dDD = rd(mWithout.maxDrawdownPct - mWith.maxDrawdownPct);
+    const dTrades = mWithout.totalTrades - mWith.totalTrades;
+    const sign = (v: number) => (v >= 0 ? '+' : '') + v;
+    console.log(`    DELTA:          Ret: ${sign(dRet)}%  PF: ${sign(dPF)}  DD: ${sign(dDD)}%  Trades: ${sign(dTrades)}`);
+
+    if (mWithout.maxDrawdownPct > mWith.maxDrawdownPct * 2) {
+      console.log('    >> EMA200 filter significantly reduces drawdown. Keep it ON.');
+    } else if (mWithout.totalReturnPct > mWith.totalReturnPct * 1.3 && mWithout.maxDrawdownPct < mWith.maxDrawdownPct * 1.5) {
+      console.log('    >> Removing EMA200 boosts return with acceptable DD increase. Worth investigating.');
+    } else {
+      console.log('    >> Marginal difference. EMA200 filter adds safety with modest cost.');
+    }
+    console.log('');
+  }
+
+  // ════════════════════════════════════════════════════════
   // Best per interval with year breakdown
+  // ════════════════════════════════════════════════════════
   console.log('══════════════════════════════════════════════════════════════════════════════════');
   console.log('  BEST PER TIMEFRAME — WITH PER-YEAR BREAKDOWN');
   console.log('══════════════════════════════════════════════════════════════════════════════════\n');
@@ -182,7 +442,8 @@ async function main() {
     const best = results.find(r => r.interval === interval && r.score > -999);
     if (!best) { console.log(`  [${interval}] No valid results\n`); continue; }
     const m = best.metrics;
-    console.log(`  [${interval.toUpperCase()} / ${best.strategy.toUpperCase()}]  Ret: ${m.totalReturnPct}%  PF: ${m.profitFactor}  WR: ${m.winRate}%  DD: ${m.maxDrawdownPct}%  Trades: ${m.totalTrades}  AvgR: ${m.avgRMultiple}`);
+    const stability = checkStability(best, lookup, results);
+    console.log(`  [${interval.toUpperCase()} / ${best.strategy.toUpperCase()}]  Ret: ${m.totalReturnPct}%  PF: ${m.profitFactor}  WR: ${m.winRate}%  DD: ${m.maxDrawdownPct}%  Trades: ${m.totalTrades}  AvgR: ${m.avgRMultiple}  [${stability}]`);
     const args = Object.entries(best.params).map(([k, v]) => `--${k}=${v}`).join(' ');
     console.log(`  Run:  npx tsx run.ts ${args}`);
 
@@ -195,7 +456,9 @@ async function main() {
     console.log('');
   }
 
+  // ════════════════════════════════════════════════════════
   // Best per strategy
+  // ════════════════════════════════════════════════════════
   console.log('══════════════════════════════════════════════════════════════════════════════════');
   console.log('  BEST PER STRATEGY (any timeframe)');
   console.log('══════════════════════════════════════════════════════════════════════════════════\n');
@@ -204,7 +467,10 @@ async function main() {
     const best = results.find(r => r.strategy === strategy && r.score > -999);
     if (!best) continue;
     const m = best.metrics;
-    console.log(`  [${best.interval.toUpperCase()} / ${strategy.toUpperCase()}]  Ret: ${m.totalReturnPct}%  PF: ${m.profitFactor}  WR: ${m.winRate}%  DD: ${m.maxDrawdownPct}%  Trades: ${m.totalTrades}  AvgR: ${m.avgRMultiple}`);
+    const stability = checkStability(best, lookup, results);
+    const warnings = getWarnings(m);
+    const warnStr = warnings.length > 0 ? '  !! ' + warnings.join(', ') : '';
+    console.log(`  [${best.interval.toUpperCase()} / ${strategy.toUpperCase()}]  Ret: ${m.totalReturnPct}%  PF: ${m.profitFactor}  WR: ${m.winRate}%  DD: ${m.maxDrawdownPct}%  Trades: ${m.totalTrades}  AvgR: ${m.avgRMultiple}  [${stability}]${warnStr}`);
     const args = Object.entries(best.params).map(([k, v]) => `--${k}=${v}`).join(' ');
     console.log(`  Run:  npx tsx run.ts ${args}`);
 

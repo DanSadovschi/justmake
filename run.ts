@@ -17,7 +17,9 @@ function parseArgs(): Partial<Config> {
     const m = arg.match(/^--(\w+)=(.+)$/);
     if (!m) continue;
     const [, key, val] = m;
-    overrides[key] = isNaN(Number(val)) ? val : Number(val);
+    if (val === 'true') overrides[key] = true;
+    else if (val === 'false') overrides[key] = false;
+    else overrides[key] = isNaN(Number(val)) ? val : Number(val);
   }
   return overrides as Partial<Config>;
 }
@@ -56,6 +58,10 @@ function printConfig(cfg: Config): void {
   console.log(`  SL: ${cfg.slAtrMultiple}xATR  Trail: activate ${cfg.trailActivateR}R, ${cfg.trailAtrMultiple}xATR`);
   if (cfg.strategy === 'breakout') console.log(`  Breakout: period=${cfg.breakoutPeriod} volMult=${cfg.breakoutVolMult}`);
   if (cfg.strategy === 'pullback') console.log(`  Pullback: ${cfg.pullbackMaxPct}%`);
+  if (cfg.strategy === 'momentum_adx') console.log(`  ADX threshold: ${cfg.adxThreshold}`);
+  if (cfg.strategy === 'macd_zero') console.log(`  MACD: ${cfg.macdFast}/${cfg.macdSlow}/${cfg.macdSignalPeriod}`);
+  if (cfg.strategy === 'bband_squeeze') console.log(`  BBand: period=${cfg.bbPeriod} stdDev=${cfg.bbStdDev} squeezePctile=${cfg.bbSqueezePctile}%`);
+  if (cfg.strategy === 'scoring') console.log(`  Scoring: threshold=${cfg.scoreThreshold}/5  ADX>=${cfg.adxThreshold}  breakout=${cfg.breakoutPeriod}  ATR%=[${cfg.minAtrPct}-${cfg.maxAtrPct}]  EMA200=${cfg.useEma200Filter}`);
   console.log(`  Risk: ${cfg.riskPerTrade * 100}%/trade  Min R:R: 1:${cfg.minRiskReward}`);
   console.log(`  MaxHold: ${cfg.maxHoldBars}bars  Cooldown: ${cfg.cooldownBars}bars  MinConf: ${cfg.minConfidence}`);
   console.log(`  Fees: ${cfg.feeRate * 100}%/side  Capital: $${cfg.initialCapital}`);

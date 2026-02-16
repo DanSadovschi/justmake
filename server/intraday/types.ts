@@ -56,6 +56,16 @@ export interface Indicators {
   rsi14: number[];
   atr14: number[];
   volumeSma20: number[];
+  adx: number[];
+  macdLine: number[];
+  macdSignal: number[];
+  macdHist: number[];
+  bbUpper: number[];
+  bbLower: number[];
+  bbMiddle: number[];
+  bbWidth: number[];
+  stochRsiK: number[];
+  stochRsiD: number[];
 }
 
 export interface BacktestResult {

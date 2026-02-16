@@ -5,13 +5,20 @@
 
 import type { Config } from './config.js';
 import type { Candle, Trade, Indicators, Metrics, BacktestResult, ExitReason } from './types.js';
-import { emaClose, rsi as calcRsi, atr as calcAtr, volumeSma } from './indicators.js';
+import {
+  emaClose, rsi as calcRsi, atr as calcAtr, volumeSma,
+  adx as calcAdx, macd as calcMacd, bollingerBands, stochRsi as calcStochRsi,
+} from './indicators.js';
 import { checkSignal } from './strategy.js';
 
 // Need 200+ bars for EMA200 warmup
 const WARMUP = 210;
 
 export function computeIndicators(candles: Candle[], cfg: Config): Indicators {
+  const m = calcMacd(candles, cfg.macdFast, cfg.macdSlow, cfg.macdSignalPeriod);
+  const bb = bollingerBands(candles, cfg.bbPeriod, cfg.bbStdDev);
+  const sr = calcStochRsi(candles, cfg.rsiPeriod, 14, 3);
+
   return {
     ema20: emaClose(candles, cfg.emaFast),
     ema50: emaClose(candles, cfg.emaSlow),
@@ -19,6 +26,16 @@ export function computeIndicators(candles: Candle[], cfg: Config): Indicators {
     rsi14: calcRsi(candles, cfg.rsiPeriod),
     atr14: calcAtr(candles, cfg.atrPeriod),
     volumeSma20: volumeSma(candles, 20),
+    adx: calcAdx(candles, cfg.adxPeriod),
+    macdLine: m.line,
+    macdSignal: m.signal,
+    macdHist: m.histogram,
+    bbUpper: bb.upper,
+    bbLower: bb.lower,
+    bbMiddle: bb.middle,
+    bbWidth: bb.width,
+    stochRsiK: sr.k,
+    stochRsiD: sr.d,
   };
 }
 
