@@ -78,21 +78,25 @@ function printTrades(trades: Trade[], limit = 20): void {
 }
 
 // ── Main ──
-const overrides = parseArgs();
-const cfg: Config = { ...DEFAULT_CONFIG, ...overrides };
+async function main() {
+  const overrides = parseArgs();
+  const cfg: Config = { ...DEFAULT_CONFIG, ...overrides };
 
-printConfig(cfg);
+  printConfig(cfg);
 
-console.log('\nFetching data...');
-const candles = fetchCandles(cfg.lookbackDays, cfg.interval);
+  console.log('\nFetching data...');
+  const candles = await fetchCandles(cfg.lookbackDays);
 
-if (candles.length < 220) {
-  console.error(`Not enough candles: ${candles.length} (need 220+)`);
-  process.exit(1);
+  if (candles.length < 220) {
+    console.error(`Not enough candles: ${candles.length} (need 220+)`);
+    process.exit(1);
+  }
+
+  console.log(`Running backtest on ${candles.length} candles...`);
+  const result = runBacktest(candles, cfg);
+
+  printMetrics(result.metrics, cfg);
+  printTrades(result.trades);
 }
 
-console.log(`Running backtest on ${candles.length} candles...`);
-const result = runBacktest(candles, cfg);
-
-printMetrics(result.metrics, cfg);
-printTrades(result.trades);
+main();

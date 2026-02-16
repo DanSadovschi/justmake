@@ -1,73 +1,69 @@
 /**
- * Data Fetcher — CryptoCompare hourly via curl.
- * Uses curl because Node.js fetch has DNS issues in some environments.
- * Single export: fetchCandles(lookbackDays, interval)
+ * Data Fetcher — Binance public API (no key needed).
+ * Fetches BTC/USDT hourly klines.
  */
 
-import { execSync } from 'child_process';
 import type { Candle } from './types.js';
 
-const CC_LIMIT = 2000;
+const BINANCE_LIMIT = 1000;
 
-interface CcResponse {
-  Response: string;
-  Message: string;
-  Data: {
-    Data: Array<{
-      time: number; open: number; high: number;
-      low: number; close: number; volumefrom: number;
-    }>;
-  };
+function sleep(ms: number): Promise<void> {
+  return new Promise(r => setTimeout(r, ms));
 }
 
-function curlJson<T>(url: string): T {
-  const out = execSync(`curl -s "${url}"`, { timeout: 30_000 });
-  return JSON.parse(out.toString()) as T;
-}
+async function fetchPage(startTime: number, endTime: number): Promise<Candle[]> {
+  const url = `https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1h&startTime=${startTime}&endTime=${endTime}&limit=${BINANCE_LIMIT}`;
 
-function fetchCcPage(limit = CC_LIMIT, toTs?: number): Candle[] {
-  let url = `https://min-api.cryptocompare.com/data/v2/histohour?fsym=BTC&tsym=USD&limit=${limit}`;
-  if (toTs !== undefined) url += `&toTs=${toTs}`;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const res = await fetch(url);
 
-  const json = curlJson<CcResponse>(url);
-  if (json.Response === 'Error') throw new Error(`CC: ${json.Message}`);
+    if (res.status === 429) {
+      const wait = (attempt + 1) * 3000;
+      console.log(`[data] Rate limited, waiting ${wait / 1000}s...`);
+      await sleep(wait);
+      continue;
+    }
 
-  return json.Data.Data
-    .filter(d => d.close > 0)
-    .map(d => ({
-      openTime: d.time * 1000,
-      open: d.open,
-      high: d.high,
-      low: d.low,
-      close: d.close,
-      volume: d.volumefrom,
+    if (!res.ok) throw new Error(`Binance HTTP ${res.status}: ${res.statusText}`);
+
+    const data = (await res.json()) as unknown[][];
+    return data.map(k => ({
+      openTime: k[0] as number,
+      open: Number(k[1]),
+      high: Number(k[2]),
+      low: Number(k[3]),
+      close: Number(k[4]),
+      volume: Number(k[5]),
     }));
+  }
+  throw new Error('Binance rate limit exceeded after retries');
 }
 
 /**
- * Fetch BTC/USD hourly candles from CryptoCompare.
- * Paginates backwards from now. Max ~2000 candles per request.
+ * Fetch BTC/USDT hourly candles from Binance.
+ * Paginates forward from startTime.
  */
-export function fetchCandles(
+export async function fetchCandles(
   lookbackDays: number,
-  _interval: string,
-): Candle[] {
-  const startMs = Date.now() - lookbackDays * 86_400_000;
+): Promise<Candle[]> {
+  const now = Date.now();
+  const startMs = now - lookbackDays * 86_400_000;
   const all: Candle[] = [];
-  let toTs: number | undefined;
+  let cursor = startMs;
 
-  console.log(`[data] Fetching BTC/USD hourly from CryptoCompare (${lookbackDays} days)...`);
+  console.log(`[data] Fetching BTCUSDT 1H from Binance (${lookbackDays} days)...`);
 
-  for (let p = 0; p < 20; p++) {
-    const batch = fetchCcPage(CC_LIMIT, toTs);
+  for (let p = 0; p < 50; p++) {
+    if (p > 0) await sleep(300);
+
+    const batch = await fetchPage(cursor, now);
     if (batch.length === 0) break;
 
-    all.push(...batch.filter(c => c.openTime >= startMs));
-    const oldest = batch[0].openTime;
-    if (oldest <= startMs || batch.length < CC_LIMIT) break;
-    toTs = Math.floor(oldest / 1000) - 1;
+    all.push(...batch);
+    cursor = batch[batch.length - 1].openTime + 1;
 
-    if (p > 0) console.log(`[data] page ${p + 1}, ${all.length} candles so far...`);
+    if (batch.length < BINANCE_LIMIT) break;
+    if (p > 0) console.log(`[data] page ${p + 1}, ${all.length} candles...`);
   }
 
   // Deduplicate + sort

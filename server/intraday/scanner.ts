@@ -25,13 +25,13 @@ export interface LiveScanResult {
   trendBullish: boolean;
 }
 
-export function scanLiveSignal(
+export async function scanLiveSignal(
   overrides?: Partial<Config>,
-): LiveScanResult {
+): Promise<LiveScanResult> {
   const cfg: Config = { ...DEFAULT_CONFIG, ...overrides };
 
   // 60 days of 1H = ~1440 candles, enough for EMA200 warmup
-  const candles = fetchCandles(60, cfg.interval);
+  const candles = await fetchCandles(60);
   if (candles.length < 210) {
     throw new Error(`Not enough data: ${candles.length} candles (need 210+)`);
   }
