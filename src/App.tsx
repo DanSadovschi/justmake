@@ -1,8 +1,5 @@
 import { BrowserRouter, Routes, Route } from 'react-router-dom';
 import Layout from './components/Layout';
-import Dashboard from './pages/Dashboard';
-import Chart from './pages/Chart';
-import Signals from './pages/Signals';
 import Intraday from './pages/Intraday';
 
 export default function App() {
@@ -10,10 +7,7 @@ export default function App() {
     <BrowserRouter>
       <Routes>
         <Route element={<Layout />}>
-          <Route path="/" element={<Dashboard />} />
-          <Route path="/chart" element={<Chart />} />
-          <Route path="/signals" element={<Signals />} />
-          <Route path="/intraday" element={<Intraday />} />
+          <Route path="/" element={<Intraday />} />
         </Route>
       </Routes>
     </BrowserRouter>
