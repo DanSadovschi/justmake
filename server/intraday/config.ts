@@ -1,11 +1,13 @@
 /**
- * Simplified config — LONG only, single 1H timeframe.
- * ~20 params instead of 30+.
+ * Config — LONG only, single 1H timeframe, 3 strategies.
  */
+
+export type StrategyType = 'pullback' | 'breakout' | 'momentum';
 
 export interface Config {
   symbol: string;
   interval: '1h';
+  strategy: StrategyType;
 
   // EMAs
   emaFast: number;        // 20
@@ -14,15 +16,19 @@ export interface Config {
 
   // RSI
   rsiPeriod: number;      // 14
-  rsiMin: number;         // 40  — don't enter below this
-  rsiMax: number;         // 60  — don't enter above this
+  rsiMin: number;         // 40
+  rsiMax: number;         // 60
 
   // ATR
   atrPeriod: number;      // 14
   slAtrMultiple: number;  // 2.0 × ATR for stop loss
 
-  // Pullback
+  // Pullback-specific
   pullbackMaxPct: number; // 1.5% — max distance from EMA20
+
+  // Breakout-specific
+  breakoutPeriod: number; // 20 — lookback for highest high
+  breakoutVolMult: number; // 1.2 — min volume vs SMA
 
   // Risk
   riskPerTrade: number;   // 0.01 = 1%
@@ -48,6 +54,7 @@ export interface Config {
 export const DEFAULT_CONFIG: Config = {
   symbol: 'BTCUSDT',
   interval: '1h',
+  strategy: 'breakout',
 
   emaFast: 20,
   emaSlow: 50,
@@ -61,6 +68,9 @@ export const DEFAULT_CONFIG: Config = {
   slAtrMultiple: 2.0,
 
   pullbackMaxPct: 1.5,
+
+  breakoutPeriod: 20,
+  breakoutVolMult: 1.2,
 
   riskPerTrade: 0.01,
   minRiskReward: 2.0,

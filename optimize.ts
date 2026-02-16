@@ -1,35 +1,51 @@
 /**
- * Parameter Grid Search — finds best parameter combinations.
- * Run: npx tsx optimize.ts
+ * Parameter Grid Search — tests all 3 strategies with parameter combos.
+ * Run: npx tsx optimize.ts [lookbackDays]
  */
 
-import { DEFAULT_CONFIG, type Config } from './server/intraday/config.js';
+import { DEFAULT_CONFIG, type Config, type StrategyType } from './server/intraday/config.js';
 import { fetchCandles } from './server/intraday/data-fetcher.js';
 import { runBacktest } from './server/intraday/backtest.js';
 import type { Metrics } from './server/intraday/types.js';
 
-// ── Parameter grid ──
-const GRID = {
+// ── Parameter grids per strategy ──
+const STRATEGIES: StrategyType[] = ['breakout', 'momentum', 'pullback'];
+
+// Shared params for all strategies
+const SHARED = {
   slAtrMultiple:    [2.0, 2.5, 3.0],
   trailActivateR:   [1.5, 2.0, 2.5],
   trailAtrMultiple: [1.5, 2.0, 2.5],
-  rsiMin:           [30, 35, 40],
-  rsiMax:           [60, 65, 70],
   maxHoldBars:      [48, 72, 96],
-  pullbackMaxPct:   [1.5, 2.0, 2.5],
+  rsiMax:           [60, 65, 70],
+};
+
+// Strategy-specific params
+const SPECIFIC: Record<StrategyType, Record<string, number[]>> = {
+  breakout: {
+    breakoutPeriod:  [10, 15, 20, 30],
+    breakoutVolMult: [1.0, 1.2, 1.5],
+  },
+  momentum: {
+    // Momentum uses fewer specific params — test EMA combos
+    emaFast: [10, 20],
+    emaSlow: [30, 50],
+  },
+  pullback: {
+    pullbackMaxPct: [1.5, 2.0, 2.5],
+    rsiMin:         [30, 35, 40],
+  },
 };
 
 interface Result {
-  params: Record<string, number>;
+  strategy: StrategyType;
+  params: Record<string, number | string>;
   metrics: Metrics;
   score: number;
 }
 
-// Score function: balance return, drawdown, and trade count
 function score(m: Metrics): number {
-  if (m.totalTrades < 15) return -999;
-  // Reward: return and profit factor
-  // Penalize: drawdown and low trade count
+  if (m.totalTrades < 10) return -999;
   return (
     m.totalReturnPct * 0.4 +
     m.profitFactor * 20 +
@@ -38,7 +54,6 @@ function score(m: Metrics): number {
   );
 }
 
-// Generate all combos from grid
 function* combos(grid: Record<string, number[]>): Generator<Record<string, number>> {
   const keys = Object.keys(grid);
   const values = keys.map(k => grid[k]);
@@ -59,59 +74,67 @@ async function main() {
   const lookback = Number(process.argv[2]) || 365;
   console.log(`Fetching ${lookback}d of data...\n`);
   const candles = await fetchCandles(lookback);
-  console.log(`\nGot ${candles.length} candles. Starting grid search...\n`);
-
-  const allCombos = [...combos(GRID)];
-  console.log(`Testing ${allCombos.length} parameter combinations...\n`);
+  console.log(`\nGot ${candles.length} candles.\n`);
 
   const results: Result[] = [];
-  let done = 0;
+  let totalTested = 0;
 
-  for (const params of allCombos) {
-    const cfg: Config = { ...DEFAULT_CONFIG, ...params } as Config;
-    const result = runBacktest(candles, cfg);
-    const s = score(result.metrics);
-    results.push({ params, metrics: result.metrics, score: s });
+  for (const strategy of STRATEGIES) {
+    const grid = { ...SHARED, ...SPECIFIC[strategy] };
+    const allCombos = [...combos(grid)];
+    console.log(`[${strategy}] Testing ${allCombos.length} combinations...`);
 
-    done++;
-    if (done % 500 === 0) {
-      console.log(`  ${done}/${allCombos.length} tested...`);
+    for (const params of allCombos) {
+      const cfg: Config = { ...DEFAULT_CONFIG, strategy, ...params } as Config;
+      const result = runBacktest(candles, cfg);
+      const s = score(result.metrics);
+      results.push({ strategy, params: { strategy, ...params }, metrics: result.metrics, score: s });
+      totalTested++;
     }
   }
 
-  // Sort by score descending
+  console.log(`\nTotal: ${totalTested} combinations tested.\n`);
+
+  // Sort by score
   results.sort((a, b) => b.score - a.score);
 
-  // Print top 15
-  console.log('\n══════════════════════════════════════════════════════════════════════════════');
-  console.log('  TOP 15 PARAMETER COMBINATIONS');
-  console.log('══════════════════════════════════════════════════════════════════════════════\n');
+  // Print top 20
+  console.log('══════════════════════════════════════════════════════════════════════════════════');
+  console.log('  TOP 20 — ALL STRATEGIES COMPARED');
+  console.log('══════════════════════════════════════════════════════════════════════════════════\n');
 
-  const top = results.slice(0, 15);
+  const top = results.slice(0, 20);
   for (let i = 0; i < top.length; i++) {
     const r = top[i];
     const m = r.metrics;
-    console.log(`  #${i + 1}  Score: ${r.score.toFixed(1)}  |  Return: ${m.totalReturnPct}%  PF: ${m.profitFactor}  WR: ${m.winRate}%  DD: ${m.maxDrawdownPct}%  Trades: ${m.totalTrades}  AvgR: ${m.avgRMultiple}`);
-    console.log(`      SL: ${r.params.slAtrMultiple}xATR  Trail: ${r.params.trailActivateR}R/${r.params.trailAtrMultiple}xATR  RSI: ${r.params.rsiMin}-${r.params.rsiMax}  Hold: ${r.params.maxHoldBars}h  Pullback: ${r.params.pullbackMaxPct}%`);
-    console.log(`      Exits: SL=${m.exitReasons['stop_loss'] ?? 0} Trail=${m.exitReasons['trailing_stop'] ?? 0} Timeout=${m.exitReasons['timeout'] ?? 0}`);
+    const strat = String(r.strategy).toUpperCase().padEnd(10);
+    console.log(`  #${String(i + 1).padStart(2)}  [${strat}]  Score: ${r.score.toFixed(1).padStart(6)}  |  Return: ${m.totalReturnPct}%  PF: ${m.profitFactor}  WR: ${m.winRate}%  DD: ${m.maxDrawdownPct}%  Trades: ${m.totalTrades}  AvgR: ${m.avgRMultiple}`);
+
+    // Print params compactly
+    const p = r.params;
+    const paramStr = Object.entries(p)
+      .filter(([k]) => k !== 'strategy')
+      .map(([k, v]) => `${k}=${v}`)
+      .join('  ');
+    console.log(`        ${paramStr}`);
+    console.log(`        Exits: SL=${m.exitReasons['stop_loss'] ?? 0} Trail=${m.exitReasons['trailing_stop'] ?? 0} Timeout=${m.exitReasons['timeout'] ?? 0}`);
     console.log('');
   }
 
-  // Print worst 3 for contrast
-  console.log('── WORST 3 ──\n');
-  const worst = results.slice(-3).reverse();
-  for (const r of worst) {
-    const m = r.metrics;
-    console.log(`  Score: ${r.score.toFixed(1)}  |  Return: ${m.totalReturnPct}%  PF: ${m.profitFactor}  Trades: ${m.totalTrades}`);
-    console.log(`      SL: ${r.params.slAtrMultiple}xATR  Trail: ${r.params.trailActivateR}R/${r.params.trailAtrMultiple}xATR  RSI: ${r.params.rsiMin}-${r.params.rsiMax}  Hold: ${r.params.maxHoldBars}h  Pullback: ${r.params.pullbackMaxPct}%`);
+  // Best per strategy
+  console.log('══════════════════════════════════════════════════════════════════════════════════');
+  console.log('  BEST PER STRATEGY');
+  console.log('══════════════════════════════════════════════════════════════════════════════════\n');
+
+  for (const strategy of STRATEGIES) {
+    const best = results.find(r => r.strategy === strategy);
+    if (!best) continue;
+    const m = best.metrics;
+    console.log(`  [${strategy.toUpperCase()}]  Return: ${m.totalReturnPct}%  PF: ${m.profitFactor}  WR: ${m.winRate}%  DD: ${m.maxDrawdownPct}%  Trades: ${m.totalTrades}  AvgR: ${m.avgRMultiple}`);
+    const args = Object.entries(best.params).map(([k, v]) => `--${k}=${v}`).join(' ');
+    console.log(`  Run:  npx tsx run.ts ${args}`);
     console.log('');
   }
-
-  // Print the winning config as CLI command
-  const best = top[0];
-  const args = Object.entries(best.params).map(([k, v]) => `--${k}=${v}`).join(' ');
-  console.log('── RUN BEST CONFIG ──');
-  console.log(`  npx tsx run.ts ${args}\n`);
 }
 
 main();

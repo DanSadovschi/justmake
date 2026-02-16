@@ -51,9 +51,12 @@ function printMetrics(m: Metrics, cfg: Config): void {
 
 function printConfig(cfg: Config): void {
   console.log('\n── Config ──');
+  console.log(`  Strategy: ${cfg.strategy.toUpperCase()}`);
   console.log(`  EMA: ${cfg.emaFast}/${cfg.emaSlow}/${cfg.emaTrend}  RSI: ${cfg.rsiPeriod} [${cfg.rsiMin}-${cfg.rsiMax}]`);
   console.log(`  SL: ${cfg.slAtrMultiple}xATR  Trail: activate ${cfg.trailActivateR}R, ${cfg.trailAtrMultiple}xATR`);
-  console.log(`  Pullback: ${cfg.pullbackMaxPct}%  Risk: ${cfg.riskPerTrade * 100}%/trade  Min R:R: 1:${cfg.minRiskReward}`);
+  if (cfg.strategy === 'breakout') console.log(`  Breakout: period=${cfg.breakoutPeriod} volMult=${cfg.breakoutVolMult}`);
+  if (cfg.strategy === 'pullback') console.log(`  Pullback: ${cfg.pullbackMaxPct}%`);
+  console.log(`  Risk: ${cfg.riskPerTrade * 100}%/trade  Min R:R: 1:${cfg.minRiskReward}`);
   console.log(`  MaxHold: ${cfg.maxHoldBars}bars  Cooldown: ${cfg.cooldownBars}bars  MinConf: ${cfg.minConfidence}`);
   console.log(`  Fees: ${cfg.feeRate * 100}%/side  Capital: $${cfg.initialCapital}`);
 }
