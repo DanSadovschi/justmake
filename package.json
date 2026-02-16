@@ -7,6 +7,7 @@
     "bt": "tsx run.ts",
     "bt:180": "tsx run.ts --lookbackDays=180",
     "bt:365": "tsx run.ts --lookbackDays=365",
+    "optimize": "tsx optimize.ts",
     "check": "tsc -b --noEmit"
   },
   "devDependencies": {
