@@ -73,15 +73,4 @@ export const api = {
   getLivePrice: () => fetchJson<LivePrice>('/price'),
   updateData: () => fetchJson<{ inserted: number }>('/candles/update', { method: 'POST' }),
   generateSignals: () => fetchJson<{ generated: number; evaluated: number }>('/signals/generate', { method: 'POST' }),
-  // Intraday system
-  runIntradayBacktest: (config?: Record<string, unknown>) =>
-    fetchJson('/intraday/backtest', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(config ?? {}),
-    }),
-  getIntradayResults: () => fetchJson('/intraday/results'),
-  getIntradayTrades: () => fetchJson('/intraday/trades'),
-  getIntradayEquity: () => fetchJson('/intraday/equity'),
-  getIntradayConfig: () => fetchJson('/intraday/config'),
 };

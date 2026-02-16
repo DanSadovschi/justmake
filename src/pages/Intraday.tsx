@@ -1,57 +1,47 @@
-import { useState } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { fetchJson } from '../lib/api';
 
 // ────────────────────── Types ──────────────────────
+
+interface LiveSignalResponse {
+  success: boolean;
+  error?: string;
+  timestamp: number;
+  signal: {
+    active: boolean;
+    entryZone?: number;
+    stopLoss?: number;
+    takeProfit?: number;
+    confidence?: number;
+    reasoning?: Record<string, unknown>;
+  };
+  indicators: {
+    price: number;
+    ema20: number;
+    ema50: number;
+    ema200: number;
+    rsi: number;
+    atr: number;
+  };
+  trendBullish: boolean;
+}
 
 interface Metrics {
   totalTrades: number;
   winRate: number;
   profitFactor: number;
-  sharpeRatio: number;
-  sortinoRatio: number;
   maxDrawdownPct: number;
-  expectancy: number;
-  avgRMultiple: number;
   totalReturnPct: number;
   totalPnl: number;
-  avgHoldCandles: number;
+  avgRMultiple: number;
   maxConsecutiveLosses: number;
-  longTrades: number;
-  shortTrades: number;
-  longWinRate: number;
-  shortWinRate: number;
-  longPnl: number;
-  shortPnl: number;
-  trendTrades: number;
-  mrTrades: number;
-  trendWinRate: number;
-  mrWinRate: number;
-  trendPnl: number;
-  mrPnl: number;
-  exitReasonCounts: Record<string, number>;
-}
-
-interface SegmentResult {
-  metrics: Metrics;
-  tradeCount: number;
-  trades?: Trade[];
-}
-
-interface BacktestResponse {
-  success: boolean;
-  error?: string;
-  timestamp: number;
-  full: SegmentResult;
-  inSample: SegmentResult;
-  outOfSample: SegmentResult;
-  trendOnly: SegmentResult;
-  mrOnly: SegmentResult;
+  expectancy: number;
+  avgHoldBars: number;
+  exitReasons: Record<string, number>;
 }
 
 interface Trade {
   id: number;
-  direction: 'LONG' | 'SHORT';
-  strategy: 'trend_pullback' | 'mean_reversion';
   entryTime: number;
   entryPrice: number;
   exitTime: number;
@@ -59,366 +49,310 @@ interface Trade {
   pnl: number;
   pnlPct: number;
   rMultiple: number;
-  holdCandles: number;
+  holdBars: number;
   exitReason: string;
-  regime: string;
-  fees: number;
-  fundingPaid: number;
 }
 
-interface EquityResponse {
+interface BacktestResponse {
   success: boolean;
-  equity: { time: number; equity: number; drawdownPct: number }[];
+  error?: string;
+  metrics: Metrics;
+  trades: Trade[];
+  tradeCount: number;
 }
-
-// ────────────────────── Config Form Values ──────────────────────
-
-interface FormConfig {
-  ltfInterval: string;
-  htfInterval: string;
-  marketType: string;
-  lookbackDays: number;
-  riskPerTrade: number;
-  slAtrMultiple: number;
-  maxHoldCandles: number;
-  initialCapital: number;
-}
-
-const defaultForm: FormConfig = {
-  ltfInterval: '15m',
-  htfInterval: '4h',
-  marketType: 'spot',
-  lookbackDays: 730,
-  riskPerTrade: 1,
-  slAtrMultiple: 1.5,
-  maxHoldCandles: 192,
-  initialCapital: 10000,
-};
 
 // ────────────────────── Component ──────────────────────
 
 export default function Intraday() {
-  const [form, setForm] = useState<FormConfig>(defaultForm);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [data, setData] = useState<BacktestResponse | null>(null);
-  const [equity, setEquity] = useState<EquityResponse['equity']>([]);
-  const [tab, setTab] = useState<'overview' | 'comparison' | 'trades' | 'equity'>('overview');
+  // Live signal state
+  const [liveData, setLiveData] = useState<LiveSignalResponse | null>(null);
+  const [liveLoading, setLiveLoading] = useState(false);
+  const [liveError, setLiveError] = useState<string | null>(null);
 
-  const runBacktest = async () => {
-    setLoading(true);
-    setError(null);
+  // Backtest state
+  const [btData, setBtData] = useState<BacktestResponse | null>(null);
+  const [btLoading, setBtLoading] = useState(false);
+  const [btError, setBtError] = useState<string | null>(null);
+  const [lookbackDays, setLookbackDays] = useState(365);
+  const [showBacktest, setShowBacktest] = useState(false);
+
+  // Fetch live signal
+  const fetchLive = useCallback(async () => {
+    setLiveLoading(true);
+    setLiveError(null);
     try {
-      const result = await fetchJson<BacktestResponse>('/intraday/backtest', {
+      const res = await fetchJson<LiveSignalResponse>('/intraday/live-signal');
+      setLiveData(res);
+    } catch (e) {
+      setLiveError(e instanceof Error ? e.message : 'Failed to scan');
+    } finally {
+      setLiveLoading(false);
+    }
+  }, []);
+
+  // Auto-fetch on mount
+  useEffect(() => { fetchLive(); }, [fetchLive]);
+
+  // Auto-refresh every 5 minutes
+  useEffect(() => {
+    const timer = setInterval(fetchLive, 5 * 60 * 1000);
+    return () => clearInterval(timer);
+  }, [fetchLive]);
+
+  // Run backtest
+  const runBacktest = async () => {
+    setBtLoading(true);
+    setBtError(null);
+    try {
+      const res = await fetchJson<BacktestResponse>('/intraday/backtest', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          ltfInterval: form.ltfInterval,
-          htfInterval: form.htfInterval,
-          marketType: form.marketType,
-          lookbackDays: form.lookbackDays,
-          riskPerTrade: form.riskPerTrade / 100,
-          slAtrMultiple: form.slAtrMultiple,
-          maxHoldCandles: form.maxHoldCandles,
-          initialCapital: form.initialCapital,
-        }),
+        body: JSON.stringify({ lookbackDays }),
       });
-      setData(result);
-
-      // Fetch equity curve
-      const eq = await fetchJson<EquityResponse>('/intraday/equity');
-      if (eq.success) setEquity(eq.equity);
+      setBtData(res);
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Backtest failed');
+      setBtError(e instanceof Error ? e.message : 'Backtest failed');
     } finally {
-      setLoading(false);
+      setBtLoading(false);
     }
   };
 
   return (
     <div className="space-y-6">
+      {/* Header */}
       <div className="flex items-center justify-between">
-        <h2 className="text-2xl font-bold">Intraday Trading System</h2>
-        <span className="text-xs text-gray-500">BTCUSDT | Multi-Timeframe | LONG + SHORT</span>
+        <h2 className="text-2xl font-bold">BTCUSDT LONG</h2>
+        <span className="text-xs text-gray-500">EMA Pullback | 1H | Auto-refresh 5min</span>
       </div>
 
-      {/* Config Form */}
-      <ConfigForm form={form} setForm={setForm} onRun={runBacktest} loading={loading} />
+      {/* ── LIVE SIGNAL PANEL ── */}
+      <LiveSignalPanel
+        data={liveData}
+        loading={liveLoading}
+        error={liveError}
+        onRefresh={fetchLive}
+      />
 
-      {error && (
-        <div className="rounded-lg bg-red-900/30 border border-red-800 p-4 text-red-300">{error}</div>
-      )}
+      {/* ── BACKTEST SECTION (collapsible) ── */}
+      <div className="rounded-lg bg-gray-900 border border-gray-800">
+        <button
+          onClick={() => setShowBacktest(!showBacktest)}
+          className="w-full px-4 py-3 flex items-center justify-between text-sm font-medium text-gray-300 hover:text-gray-100"
+        >
+          <span>Backtest</span>
+          <span className="text-gray-500">{showBacktest ? '−' : '+'}</span>
+        </button>
 
-      {data && data.success && (
-        <>
-          {/* Tab Navigation */}
-          <div className="flex gap-1 border-b border-gray-800">
-            {(['overview', 'comparison', 'trades', 'equity'] as const).map(t => (
+        {showBacktest && (
+          <div className="px-4 pb-4 space-y-4 border-t border-gray-800">
+            {/* Minimal form */}
+            <div className="flex items-end gap-3 pt-3">
+              <label className="space-y-1">
+                <span className="text-xs text-gray-400">Lookback (days)</span>
+                <input
+                  type="number"
+                  value={lookbackDays}
+                  onChange={e => setLookbackDays(Number(e.target.value))}
+                  className="w-24 bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-sm text-gray-100"
+                />
+              </label>
               <button
-                key={t}
-                onClick={() => setTab(t)}
-                className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
-                  tab === t
-                    ? 'border-amber-400 text-amber-400'
-                    : 'border-transparent text-gray-400 hover:text-gray-200'
-                }`}
+                onClick={runBacktest}
+                disabled={btLoading}
+                className="px-4 py-1.5 bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-black text-sm font-medium rounded transition-colors"
               >
-                {t === 'overview' ? 'Overview' : t === 'comparison' ? 'Comparison' : t === 'trades' ? 'Trades' : 'Equity'}
+                {btLoading ? 'Running...' : 'Run'}
               </button>
-            ))}
-          </div>
+            </div>
 
-          {tab === 'overview' && <OverviewTab data={data} />}
-          {tab === 'comparison' && <ComparisonTab data={data} />}
-          {tab === 'trades' && <TradesTab trades={data.full.trades ?? []} />}
-          {tab === 'equity' && <EquityTab equity={equity} />}
-        </>
-      )}
+            {btError && (
+              <div className="text-sm text-red-400">{btError}</div>
+            )}
+
+            {btData?.success && (
+              <>
+                <MetricsGrid metrics={btData.metrics} />
+                <TradesTable trades={btData.trades} total={btData.tradeCount} />
+              </>
+            )}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
 
-// ────────────────────── Config Form ──────────────────────
+// ────────────────────── Live Signal Panel ──────────────────────
 
-function ConfigForm({
-  form, setForm, onRun, loading,
+function LiveSignalPanel({
+  data, loading, error, onRefresh,
 }: {
-  form: FormConfig;
-  setForm: (f: FormConfig) => void;
-  onRun: () => void;
+  data: LiveSignalResponse | null;
   loading: boolean;
+  error: string | null;
+  onRefresh: () => void;
 }) {
-  const upd = (k: keyof FormConfig, v: string | number) =>
-    setForm({ ...form, [k]: typeof form[k] === 'number' ? Number(v) : v });
-
-  return (
-    <div className="rounded-lg bg-gray-900 border border-gray-800 p-4">
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-sm">
-        <label className="space-y-1">
-          <span className="text-gray-400">LTF Interval</span>
-          <select value={form.ltfInterval} onChange={e => upd('ltfInterval', e.target.value)}
-            className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-gray-100">
-            <option value="5m">5M (Binance)</option>
-            <option value="15m">15M (Binance)</option>
-            <option value="1h">1H</option>
-          </select>
-        </label>
-        <label className="space-y-1">
-          <span className="text-gray-400">HTF Interval</span>
-          <select value={form.htfInterval} onChange={e => upd('htfInterval', e.target.value)}
-            className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-gray-100">
-            <option value="1h">1H</option>
-            <option value="4h">4H</option>
-          </select>
-        </label>
-        <label className="space-y-1">
-          <span className="text-gray-400">Market Type</span>
-          <select value={form.marketType} onChange={e => upd('marketType', e.target.value)}
-            className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-gray-100">
-            <option value="spot">Spot</option>
-            <option value="perpetual">Perpetual</option>
-          </select>
-        </label>
-        <label className="space-y-1">
-          <span className="text-gray-400">Lookback (days)</span>
-          <input type="number" value={form.lookbackDays} onChange={e => upd('lookbackDays', e.target.value)}
-            className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-gray-100" />
-        </label>
-        <label className="space-y-1">
-          <span className="text-gray-400">Risk per Trade (%)</span>
-          <input type="number" step="0.1" value={form.riskPerTrade} onChange={e => upd('riskPerTrade', e.target.value)}
-            className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-gray-100" />
-        </label>
-        <label className="space-y-1">
-          <span className="text-gray-400">SL (ATR mult)</span>
-          <input type="number" step="0.1" value={form.slAtrMultiple} onChange={e => upd('slAtrMultiple', e.target.value)}
-            className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-gray-100" />
-        </label>
-        <label className="space-y-1">
-          <span className="text-gray-400">Max Hold (candles)</span>
-          <input type="number" value={form.maxHoldCandles} onChange={e => upd('maxHoldCandles', e.target.value)}
-            className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-gray-100" />
-        </label>
-        <label className="space-y-1">
-          <span className="text-gray-400">Initial Capital ($)</span>
-          <input type="number" value={form.initialCapital} onChange={e => upd('initialCapital', e.target.value)}
-            className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-gray-100" />
-        </label>
+  if (loading && !data) {
+    return (
+      <div className="rounded-lg bg-gray-900 border border-gray-800 p-6 text-center text-gray-400">
+        Scanning market...
       </div>
-      <div className="mt-4 flex justify-end">
-        <button
-          onClick={onRun}
-          disabled={loading}
-          className="px-6 py-2 bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-black font-medium rounded-lg transition-colors"
-        >
-          {loading ? 'Running Backtest...' : 'Run Backtest'}
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="rounded-lg bg-red-900/20 border border-red-800 p-4">
+        <div className="text-red-400 text-sm">{error}</div>
+        <button onClick={onRefresh} className="mt-2 text-xs text-amber-400 hover:text-amber-300">
+          Retry
         </button>
       </div>
-    </div>
-  );
-}
+    );
+  }
 
-// ────────────────────── Overview Tab ──────────────────────
+  if (!data) return null;
 
-function OverviewTab({ data }: { data: BacktestResponse }) {
-  const m = data.full.metrics;
-  return (
-    <div className="space-y-4">
-      {/* Key Metrics Cards */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-        <MetricCard label="Total Return" value={`${m.totalReturnPct}%`} color={m.totalReturnPct >= 0 ? 'green' : 'red'} />
-        <MetricCard label="Win Rate" value={`${m.winRate}%`} color={m.winRate >= 50 ? 'green' : 'amber'} />
-        <MetricCard label="Profit Factor" value={m.profitFactor.toFixed(2)} color={m.profitFactor >= 1.5 ? 'green' : 'amber'} />
-        <MetricCard label="Total Trades" value={String(m.totalTrades)} color="gray" />
-        <MetricCard label="Sharpe Ratio" value={m.sharpeRatio.toFixed(2)} color={m.sharpeRatio >= 1 ? 'green' : 'amber'} />
-        <MetricCard label="Sortino Ratio" value={m.sortinoRatio.toFixed(2)} color={m.sortinoRatio >= 1.5 ? 'green' : 'amber'} />
-        <MetricCard label="Max Drawdown" value={`${m.maxDrawdownPct}%`} color={m.maxDrawdownPct <= 10 ? 'green' : 'red'} />
-        <MetricCard label="Expectancy" value={`$${m.expectancy.toFixed(2)}`} color={m.expectancy > 0 ? 'green' : 'red'} />
-        <MetricCard label="Avg R Multiple" value={m.avgRMultiple.toFixed(2)} color={m.avgRMultiple > 0 ? 'green' : 'red'} />
-        <MetricCard label="Avg Hold" value={`${m.avgHoldCandles.toFixed(0)} bars`} color="gray" />
-        <MetricCard label="Max Consec Losses" value={String(m.maxConsecutiveLosses)} color={m.maxConsecutiveLosses <= 5 ? 'green' : 'red'} />
-        <MetricCard label="Total PnL" value={`$${m.totalPnl.toFixed(2)}`} color={m.totalPnl >= 0 ? 'green' : 'red'} />
-      </div>
-
-      {/* Long vs Short */}
-      <div className="grid grid-cols-2 gap-3">
-        <div className="rounded-lg bg-gray-900 border border-gray-800 p-4">
-          <h3 className="text-sm font-medium text-gray-400 mb-3">Long Performance</h3>
-          <div className="space-y-2 text-sm">
-            <Row label="Trades" value={String(m.longTrades)} />
-            <Row label="Win Rate" value={`${m.longWinRate}%`} />
-            <Row label="PnL" value={`$${m.longPnl.toFixed(2)}`} color={m.longPnl >= 0 ? 'text-green-400' : 'text-red-400'} />
-          </div>
-        </div>
-        <div className="rounded-lg bg-gray-900 border border-gray-800 p-4">
-          <h3 className="text-sm font-medium text-gray-400 mb-3">Short Performance</h3>
-          <div className="space-y-2 text-sm">
-            <Row label="Trades" value={String(m.shortTrades)} />
-            <Row label="Win Rate" value={`${m.shortWinRate}%`} />
-            <Row label="PnL" value={`$${m.shortPnl.toFixed(2)}`} color={m.shortPnl >= 0 ? 'text-green-400' : 'text-red-400'} />
-          </div>
-        </div>
-      </div>
-
-      {/* Exit Reasons */}
-      <div className="rounded-lg bg-gray-900 border border-gray-800 p-4">
-        <h3 className="text-sm font-medium text-gray-400 mb-3">Exit Reasons</h3>
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-sm">
-          {Object.entries(m.exitReasonCounts).map(([reason, count]) => (
-            <div key={reason} className="flex justify-between bg-gray-800 rounded px-3 py-1.5">
-              <span className="text-gray-300">{formatExitReason(reason)}</span>
-              <span className="font-mono text-gray-100">{count}</span>
-            </div>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ────────────────────── Comparison Tab ──────────────────────
-
-function ComparisonTab({ data }: { data: BacktestResponse }) {
-  const segments = [
-    { label: 'Combined (Full)', m: data.full.metrics, count: data.full.tradeCount },
-    { label: 'In-Sample (70%)', m: data.inSample.metrics, count: data.inSample.tradeCount },
-    { label: 'Out-of-Sample (30%)', m: data.outOfSample.metrics, count: data.outOfSample.tradeCount },
-    { label: 'Trend Pullback Only', m: data.trendOnly.metrics, count: data.trendOnly.tradeCount },
-    { label: 'Mean Reversion Only', m: data.mrOnly.metrics, count: data.mrOnly.tradeCount },
-  ];
-
-  const cols = ['Trades', 'Win%', 'PF', 'Sharpe', 'Sortino', 'MaxDD%', 'Return%', 'PnL', 'AvgR'];
+  const { signal, indicators, trendBullish } = data;
+  const hasSignal = signal.active;
 
   return (
-    <div className="rounded-lg bg-gray-900 border border-gray-800 overflow-x-auto">
-      <table className="w-full text-sm">
-        <thead>
-          <tr className="border-b border-gray-800 text-gray-400">
-            <th className="text-left px-3 py-2">Segment</th>
-            {cols.map(c => <th key={c} className="text-right px-3 py-2">{c}</th>)}
-          </tr>
-        </thead>
-        <tbody>
-          {segments.map(({ label, m }) => (
-            <tr key={label} className="border-b border-gray-800/50 hover:bg-gray-800/30">
-              <td className="px-3 py-2 font-medium text-gray-200">{label}</td>
-              <td className="text-right px-3 py-2 font-mono">{m.totalTrades}</td>
-              <td className="text-right px-3 py-2 font-mono">{m.winRate}</td>
-              <td className="text-right px-3 py-2 font-mono">{m.profitFactor.toFixed(2)}</td>
-              <td className="text-right px-3 py-2 font-mono">{m.sharpeRatio.toFixed(2)}</td>
-              <td className="text-right px-3 py-2 font-mono">{m.sortinoRatio.toFixed(2)}</td>
-              <td className="text-right px-3 py-2 font-mono text-red-400">{m.maxDrawdownPct}</td>
-              <td className={`text-right px-3 py-2 font-mono ${m.totalReturnPct >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                {m.totalReturnPct}%
-              </td>
-              <td className={`text-right px-3 py-2 font-mono ${m.totalPnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                ${m.totalPnl.toFixed(0)}
-              </td>
-              <td className="text-right px-3 py-2 font-mono">{m.avgRMultiple.toFixed(2)}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-// ────────────────────── Trades Tab ──────────────────────
-
-function TradesTab({ trades }: { trades: Trade[] }) {
-  const [filter, setFilter] = useState<'all' | 'LONG' | 'SHORT' | 'trend_pullback' | 'mean_reversion'>('all');
-  const filtered = trades.filter(t => {
-    if (filter === 'all') return true;
-    if (filter === 'LONG' || filter === 'SHORT') return t.direction === filter;
-    return t.strategy === filter;
-  });
-
-  return (
-    <div className="space-y-3">
-      <div className="flex gap-2">
-        {(['all', 'LONG', 'SHORT', 'trend_pullback', 'mean_reversion'] as const).map(f => (
+    <div className={`rounded-lg border p-5 ${
+      hasSignal
+        ? 'bg-green-950/30 border-green-800'
+        : 'bg-gray-900 border-gray-800'
+    }`}>
+      {/* Top row: status + refresh */}
+      <div className="flex items-center justify-between mb-4">
+        <div className="flex items-center gap-3">
+          <div className={`w-3 h-3 rounded-full ${hasSignal ? 'bg-green-400 animate-pulse' : 'bg-gray-600'}`} />
+          <span className={`text-lg font-bold ${hasSignal ? 'text-green-400' : 'text-gray-400'}`}>
+            {hasSignal ? 'LONG SIGNAL' : 'No Signal'}
+          </span>
+        </div>
+        <div className="flex items-center gap-3">
+          <span className={`text-xs px-2 py-0.5 rounded ${
+            trendBullish ? 'bg-green-900/50 text-green-400' : 'bg-gray-800 text-gray-500'
+          }`}>
+            {trendBullish ? 'BULLISH' : 'BEARISH'}
+          </span>
           <button
-            key={f}
-            onClick={() => setFilter(f)}
-            className={`px-3 py-1 text-xs rounded-full border ${
-              filter === f ? 'border-amber-400 text-amber-400' : 'border-gray-700 text-gray-400 hover:text-gray-200'
-            }`}
+            onClick={onRefresh}
+            disabled={loading}
+            className="text-xs text-gray-500 hover:text-gray-300 disabled:opacity-50"
           >
-            {f === 'all' ? 'All' : f === 'trend_pullback' ? 'Trend' : f === 'mean_reversion' ? 'MR' : f}
+            {loading ? '...' : 'Refresh'}
           </button>
-        ))}
-        <span className="ml-auto text-xs text-gray-500">{filtered.length} trades</span>
+        </div>
       </div>
 
-      <div className="rounded-lg bg-gray-900 border border-gray-800 overflow-x-auto max-h-[500px] overflow-y-auto">
+      {/* Signal details */}
+      {hasSignal && signal.entryZone && (
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
+          <SignalCard label="Entry" value={`$${fmt(signal.entryZone)}`} color="text-green-400" />
+          <SignalCard label="Stop Loss" value={`$${fmt(signal.stopLoss!)}`} color="text-red-400" />
+          <SignalCard label="Take Profit" value={`$${fmt(signal.takeProfit!)}`} color="text-amber-400" />
+          <SignalCard label="Confidence" value={`${signal.confidence}%`} color={
+            (signal.confidence ?? 0) >= 70 ? 'text-green-400' : 'text-amber-400'
+          } />
+        </div>
+      )}
+
+      {/* Indicators */}
+      <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
+        <Indicator label="Price" value={fmt(indicators.price)} />
+        <Indicator label="EMA20" value={fmt(indicators.ema20)} />
+        <Indicator label="EMA50" value={fmt(indicators.ema50)} />
+        <Indicator label="EMA200" value={fmt(indicators.ema200)} />
+        <Indicator label="RSI" value={indicators.rsi.toFixed(1)} />
+        <Indicator label="ATR" value={fmt(indicators.atr)} />
+      </div>
+
+      {/* Last updated */}
+      <div className="mt-3 text-xs text-gray-600">
+        Updated: {new Date(data.timestamp).toLocaleTimeString()}
+      </div>
+    </div>
+  );
+}
+
+function SignalCard({ label, value, color }: { label: string; value: string; color: string }) {
+  return (
+    <div className="bg-black/30 rounded px-3 py-2">
+      <div className="text-xs text-gray-500">{label}</div>
+      <div className={`text-lg font-bold font-mono ${color}`}>{value}</div>
+    </div>
+  );
+}
+
+function Indicator({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="text-center">
+      <div className="text-xs text-gray-500">{label}</div>
+      <div className="text-sm font-mono text-gray-200">{value}</div>
+    </div>
+  );
+}
+
+// ────────────────────── Metrics Grid ──────────────────────
+
+function MetricsGrid({ metrics }: { metrics: Metrics }) {
+  const m = metrics;
+  return (
+    <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
+      <MCard label="Return" value={`${m.totalReturnPct}%`} ok={m.totalReturnPct > 0} />
+      <MCard label="Win Rate" value={`${m.winRate}%`} ok={m.winRate >= 45} />
+      <MCard label="Profit Factor" value={m.profitFactor.toFixed(2)} ok={m.profitFactor >= 1.3} />
+      <MCard label="Max DD" value={`${m.maxDrawdownPct}%`} ok={m.maxDrawdownPct <= 20} />
+      <MCard label="Trades" value={String(m.totalTrades)} ok={true} />
+      <MCard label="Avg R" value={m.avgRMultiple.toFixed(2)} ok={m.avgRMultiple > 0} />
+      <MCard label="Expectancy" value={`$${m.expectancy.toFixed(2)}`} ok={m.expectancy > 0} />
+      <MCard label="Max Losses" value={String(m.maxConsecutiveLosses)} ok={m.maxConsecutiveLosses <= 10} />
+      <MCard label="Avg Hold" value={`${m.avgHoldBars.toFixed(0)}h`} ok={true} />
+      {Object.entries(m.exitReasons).map(([reason, count]) => (
+        <MCard key={reason} label={fmtReason(reason)} value={String(count)} ok={true} />
+      ))}
+    </div>
+  );
+}
+
+function MCard({ label, value, ok }: { label: string; value: string; ok: boolean }) {
+  return (
+    <div className="bg-gray-800 rounded px-2 py-1.5">
+      <div className="text-xs text-gray-500">{label}</div>
+      <div className={`text-sm font-mono font-bold ${ok ? 'text-green-400' : 'text-red-400'}`}>{value}</div>
+    </div>
+  );
+}
+
+// ────────────────────── Trades Table ──────────────────────
+
+function TradesTable({ trades, total }: { trades: Trade[]; total: number }) {
+  if (trades.length === 0) return null;
+
+  return (
+    <div>
+      <div className="text-xs text-gray-500 mb-1">
+        Last {trades.length} of {total} trades
+      </div>
+      <div className="rounded border border-gray-800 overflow-x-auto max-h-[300px] overflow-y-auto">
         <table className="w-full text-xs">
-          <thead className="sticky top-0 bg-gray-900 z-10">
-            <tr className="border-b border-gray-800 text-gray-400">
-              <th className="text-left px-2 py-1.5">#</th>
-              <th className="text-left px-2 py-1.5">Dir</th>
-              <th className="text-left px-2 py-1.5">Strategy</th>
-              <th className="text-left px-2 py-1.5">Entry</th>
-              <th className="text-right px-2 py-1.5">Entry $</th>
-              <th className="text-right px-2 py-1.5">Exit $</th>
-              <th className="text-right px-2 py-1.5">PnL</th>
-              <th className="text-right px-2 py-1.5">R</th>
-              <th className="text-right px-2 py-1.5">Hold</th>
-              <th className="text-left px-2 py-1.5">Exit</th>
-              <th className="text-left px-2 py-1.5">Regime</th>
+          <thead className="sticky top-0 bg-gray-900">
+            <tr className="border-b border-gray-800 text-gray-500">
+              <th className="text-left px-2 py-1">#</th>
+              <th className="text-left px-2 py-1">Entry</th>
+              <th className="text-right px-2 py-1">Entry $</th>
+              <th className="text-right px-2 py-1">Exit $</th>
+              <th className="text-right px-2 py-1">PnL</th>
+              <th className="text-right px-2 py-1">R</th>
+              <th className="text-right px-2 py-1">Hold</th>
+              <th className="text-left px-2 py-1">Exit</th>
             </tr>
           </thead>
           <tbody>
-            {filtered.map(t => (
+            {trades.map(t => (
               <tr key={t.id} className="border-b border-gray-800/30 hover:bg-gray-800/20">
-                <td className="px-2 py-1 text-gray-500">{t.id}</td>
-                <td className="px-2 py-1">
-                  <span className={`font-medium ${t.direction === 'LONG' ? 'text-green-400' : 'text-red-400'}`}>
-                    {t.direction}
-                  </span>
-                </td>
-                <td className="px-2 py-1 text-gray-300">
-                  {t.strategy === 'trend_pullback' ? 'Trend' : 'MR'}
-                </td>
+                <td className="px-2 py-1 text-gray-600">{t.id}</td>
                 <td className="px-2 py-1 text-gray-400">{new Date(t.entryTime).toLocaleDateString()}</td>
                 <td className="px-2 py-1 text-right font-mono">{t.entryPrice.toFixed(0)}</td>
                 <td className="px-2 py-1 text-right font-mono">{t.exitPrice.toFixed(0)}</td>
@@ -428,9 +362,8 @@ function TradesTab({ trades }: { trades: Trade[] }) {
                 <td className={`px-2 py-1 text-right font-mono ${t.rMultiple >= 0 ? 'text-green-400' : 'text-red-400'}`}>
                   {t.rMultiple.toFixed(2)}
                 </td>
-                <td className="px-2 py-1 text-right font-mono text-gray-400">{t.holdCandles}</td>
-                <td className="px-2 py-1 text-gray-300">{formatExitReason(t.exitReason)}</td>
-                <td className="px-2 py-1 text-gray-500">{t.regime}</td>
+                <td className="px-2 py-1 text-right font-mono text-gray-400">{t.holdBars}h</td>
+                <td className="px-2 py-1 text-gray-400">{fmtReason(t.exitReason)}</td>
               </tr>
             ))}
           </tbody>
@@ -440,97 +373,12 @@ function TradesTab({ trades }: { trades: Trade[] }) {
   );
 }
 
-// ────────────────────── Equity Tab ──────────────────────
+// ────────────────────── Utils ──────────────────────
 
-function EquityTab({ equity }: { equity: { time: number; equity: number; drawdownPct: number }[] }) {
-  if (equity.length === 0) {
-    return <div className="text-gray-500 text-sm">No equity data available.</div>;
-  }
-
-  const maxEquity = Math.max(...equity.map(e => e.equity));
-  const minEquity = Math.min(...equity.map(e => e.equity));
-  const range = maxEquity - minEquity || 1;
-  const maxDd = Math.max(...equity.map(e => e.drawdownPct));
-
-  // SVG chart
-  const w = 800, h = 300, pad = 40;
-  const chartW = w - pad * 2;
-  const chartH = h - pad * 2;
-
-  const points = equity.map((e, i) => {
-    const x = pad + (i / (equity.length - 1)) * chartW;
-    const y = pad + chartH - ((e.equity - minEquity) / range) * chartH;
-    return `${x},${y}`;
-  }).join(' ');
-
-  // Drawdown area
-  const ddPoints = equity.map((e, i) => {
-    const x = pad + (i / (equity.length - 1)) * chartW;
-    const y = pad + (e.drawdownPct / (maxDd || 1)) * (chartH * 0.3);
-    return `${x},${y}`;
-  });
-  const ddPath = `M${pad},${pad} ` + ddPoints.join(' L') + ` L${pad + chartW},${pad} Z`;
-
-  return (
-    <div className="space-y-4">
-      <div className="grid grid-cols-3 gap-3">
-        <MetricCard label="Final Equity" value={`$${equity[equity.length - 1].equity.toFixed(0)}`} color="green" />
-        <MetricCard label="Peak Equity" value={`$${maxEquity.toFixed(0)}`} color="gray" />
-        <MetricCard label="Max Drawdown" value={`${maxDd.toFixed(2)}%`} color="red" />
-      </div>
-
-      <div className="rounded-lg bg-gray-900 border border-gray-800 p-4">
-        <h3 className="text-sm font-medium text-gray-400 mb-2">Equity Curve</h3>
-        <svg viewBox={`0 0 ${w} ${h}`} className="w-full" style={{ maxHeight: 350 }}>
-          {/* Grid */}
-          {[0, 0.25, 0.5, 0.75, 1].map(pct => {
-            const y = pad + chartH * (1 - pct);
-            const val = minEquity + range * pct;
-            return (
-              <g key={pct}>
-                <line x1={pad} y1={y} x2={w - pad} y2={y} stroke="#374151" strokeWidth="0.5" />
-                <text x={pad - 4} y={y + 3} textAnchor="end" fill="#6b7280" fontSize="9">
-                  ${val.toFixed(0)}
-                </text>
-              </g>
-            );
-          })}
-          {/* Drawdown area */}
-          <path d={ddPath} fill="#991b1b" opacity="0.2" />
-          {/* Equity line */}
-          <polyline points={points} fill="none" stroke="#f59e0b" strokeWidth="1.5" />
-        </svg>
-      </div>
-    </div>
-  );
+function fmt(n: number): string {
+  return n >= 1000 ? n.toFixed(0).replace(/\B(?=(\d{3})+(?!\d))/g, ',') : n.toFixed(2);
 }
 
-// ────────────────────── Shared Components ──────────────────────
-
-function MetricCard({ label, value, color }: { label: string; value: string; color: string }) {
-  const colorMap: Record<string, string> = {
-    green: 'text-green-400',
-    red: 'text-red-400',
-    amber: 'text-amber-400',
-    gray: 'text-gray-100',
-  };
-  return (
-    <div className="rounded-lg bg-gray-900 border border-gray-800 p-3">
-      <div className="text-xs text-gray-400">{label}</div>
-      <div className={`text-lg font-bold font-mono ${colorMap[color] ?? 'text-gray-100'}`}>{value}</div>
-    </div>
-  );
-}
-
-function Row({ label, value, color }: { label: string; value: string; color?: string }) {
-  return (
-    <div className="flex justify-between">
-      <span className="text-gray-400">{label}</span>
-      <span className={`font-mono ${color ?? 'text-gray-100'}`}>{value}</span>
-    </div>
-  );
-}
-
-function formatExitReason(reason: string): string {
+function fmtReason(reason: string): string {
   return reason.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
 }

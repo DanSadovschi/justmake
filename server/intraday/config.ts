@@ -1,118 +1,79 @@
 /**
- * Configuration for the intraday trading system.
- * All parameters are configurable — no magic numbers in strategy code.
+ * Simplified config — LONG only, single 1H timeframe.
+ * ~20 params instead of 30+.
  */
 
-export interface IntradayConfig {
-  // ── General ──
+export interface Config {
   symbol: string;
-  marketType: 'spot' | 'perpetual';
-  ltfInterval: '5m' | '15m' | '1h';
-  htfInterval: '1h' | '4h';
+  interval: '1h';
 
-  // ── HTF Regime Detection ──
-  htfEmaFast: number;          // 50
-  htfEmaSlow: number;          // 200
-  htfAdxPeriod: number;        // 14
-  adxTrendThreshold: number;   // 20 — above this = trending
-  adxRangeThreshold: number;   // 18 — below this = ranging
-  htfEmaSlopeBars: number;     // bars back for slope calculation
+  // EMAs
+  emaFast: number;        // 20
+  emaSlow: number;        // 50
+  emaTrend: number;       // 200
 
-  // ── Trend Pullback Strategy (LTF) ──
-  ltfEmaFast: number;          // 20
-  ltfEmaSlow: number;          // 50
-  pullbackMaxPct: number;      // 1.5% — max distance candle low/high to EMA20
-  tpRsiMin: number;            // 40
-  tpRsiMax: number;            // 60
-  rsiPeriod: number;           // 14
+  // RSI
+  rsiPeriod: number;      // 14
+  rsiMin: number;         // 40  — don't enter below this
+  rsiMax: number;         // 60  — don't enter above this
 
-  // ── Mean Reversion Strategy (LTF) ──
-  mrRsiOversold: number;       // 25 (stricter)
-  mrRsiOverbought: number;     // 75 (stricter)
-  bbPeriod: number;            // 20
-  bbStdDev: number;            // 2.0
-  mrRsiExit: number;           // 50 — exit when RSI crosses back
-  mrTargetR: number;           // 1.5R target
+  // ATR
+  atrPeriod: number;      // 14
+  slAtrMultiple: number;  // 2.0 × ATR for stop loss
 
-  // ── Risk Management ──
-  atrPeriod: number;           // 14
-  slAtrMultiple: number;       // 2.0 × ATR (wider stop)
-  riskPerTrade: number;        // 0.01 = 1% of capital
-  trailActivateR: number;      // activate trailing after +1.5R
-  trailAtrMultiple: number;    // trail by 1 × ATR
-  maxHoldCandles: number;      // max position duration in LTF candles
+  // Pullback
+  pullbackMaxPct: number; // 1.5% — max distance from EMA20
 
-  // ── Signal Quality Filters ──
-  cooldownBars: number;        // min bars between trades
-  minConfidence: number;       // 0–100, skip signals below this
+  // Risk
+  riskPerTrade: number;   // 0.01 = 1%
+  minRiskReward: number;  // 2.0 = min 1:2 R:R
 
-  // ── Fees ──
-  feeRate: number;             // per side (0.001 = 0.1%)
-  fundingRate8h: number;       // per 8h for perpetual (0.0001 = 0.01%)
+  // Trailing
+  trailActivateR: number;   // 1.0 — activate after +1R
+  trailAtrMultiple: number; // 1.0 — trail by 1×ATR
 
-  // ── Backtesting ──
+  // Limits
+  maxHoldBars: number;    // 48 = 2 days on 1H
+  cooldownBars: number;   // 6 = 6 hours
+  minConfidence: number;  // 50
+
+  // Fees
+  feeRate: number;        // 0.001 = 0.1% per side
+
+  // Backtest
   initialCapital: number;
-  inSamplePct: number;         // 0.7 = 70%
-
-  // ── Data ──
-  lookbackDays: number;        // history to fetch
+  lookbackDays: number;
 }
 
-/** Interval duration in milliseconds */
-export function intervalMs(interval: string): number {
-  const map: Record<string, number> = {
-    '1m': 60_000,
-    '5m': 5 * 60_000,
-    '15m': 15 * 60_000,
-    '1h': 60 * 60_000,
-    '4h': 4 * 60 * 60_000,
-    '1d': 24 * 60 * 60_000,
-  };
-  return map[interval] ?? 60_000;
-}
-
-export const DEFAULT_CONFIG: IntradayConfig = {
+export const DEFAULT_CONFIG: Config = {
   symbol: 'BTCUSDT',
-  marketType: 'spot',
-  ltfInterval: '15m',
-  htfInterval: '4h',
+  interval: '1h',
 
-  htfEmaFast: 50,
-  htfEmaSlow: 200,
-  htfAdxPeriod: 14,
-  adxTrendThreshold: 20,
-  adxRangeThreshold: 18,
-  htfEmaSlopeBars: 5,
+  emaFast: 20,
+  emaSlow: 50,
+  emaTrend: 200,
 
-  ltfEmaFast: 20,
-  ltfEmaSlow: 50,
-  pullbackMaxPct: 1.5,
-  tpRsiMin: 40,
-  tpRsiMax: 60,
   rsiPeriod: 14,
-
-  mrRsiOversold: 25,       // stricter than 30
-  mrRsiOverbought: 75,     // stricter than 70
-  bbPeriod: 20,
-  bbStdDev: 2.0,
-  mrRsiExit: 50,
-  mrTargetR: 1.5,
+  rsiMin: 40,
+  rsiMax: 60,
 
   atrPeriod: 14,
-  slAtrMultiple: 2.0,      // wider stop — was 1.5, too tight for BTC
-  riskPerTrade: 0.01,       // 1% risk — NEVER change to 5%
-  trailActivateR: 1.5,      // was 1.0
-  trailAtrMultiple: 1.0,
-  maxHoldCandles: 192,
+  slAtrMultiple: 2.0,
 
-  cooldownBars: 12,          // 3 hours on 15m — prevent overtrading
-  minConfidence: 50,         // skip weak signals
+  pullbackMaxPct: 1.5,
+
+  riskPerTrade: 0.01,
+  minRiskReward: 2.0,
+
+  trailActivateR: 1.0,
+  trailAtrMultiple: 1.0,
+
+  maxHoldBars: 48,
+  cooldownBars: 6,
+  minConfidence: 50,
 
   feeRate: 0.001,
-  fundingRate8h: 0.0001,
 
   initialCapital: 10_000,
-  inSamplePct: 0.70,
-
-  lookbackDays: 730,
+  lookbackDays: 365,
 };

@@ -1,293 +1,210 @@
 /**
- * Backtesting Engine.
- *
- * Walks forward through LTF candles, evaluating signals and managing positions.
- * Guarantees no lookahead bias:
- *   - HTF regime uses last CLOSED HTF candle
- *   - Signal conditions checked on closed LTF candle
- *   - Entry at next candle's open
- *   - Stops checked against intra-candle high/low
- *
- * Supports running on subsets (in-sample / out-of-sample).
+ * Simple bar-by-bar backtest — LONG only, single timeframe.
+ * No walk-forward, no comparison splits.
  */
 
-import type { IntradayConfig } from './config.js';
-import { intervalMs } from './config.js';
-import type {
-  Candle,
-  Trade,
-  EquityPoint,
-  PendingSignal,
-  LtfIndicators,
-  BacktestResult,
-} from './types.js';
-import {
-  emaClose,
-  rsi as calcRsi,
-  atr as calcAtr,
-  bollingerBands,
-  volumeSma,
-  aggregateCandles,
-} from './indicators.js';
-import { computeRegimes, getRegimeAtTime } from './regime.js';
-import { checkTrendPullback, checkMeanReversion } from './signals.js';
-import {
-  calculatePositionSize,
-  calculateFees,
-  calculateFunding,
-  checkExits,
-  updateTrailingStop,
-  type OpenPosition,
-} from './risk.js';
-import { computeMetrics } from './analytics.js';
+import type { Config } from './config.js';
+import type { Candle, Trade, Indicators, Metrics, BacktestResult, ExitReason } from './types.js';
+import { emaClose, rsi as calcRsi, atr as calcAtr, volumeSma } from './indicators.js';
+import { checkSignal } from './strategy.js';
 
-// Warmup: need enough bars for the slowest indicator (EMA50 on LTF)
-const MIN_WARMUP = 60;
+// Need 200+ bars for EMA200 warmup
+const WARMUP = 210;
 
-/**
- * Run a backtest on the given LTF candles with HTF candles for regime detection.
- * If htfCandles is null, aggregates from ltfCandles.
- */
-export function runBacktest(
-  ltfCandles: Candle[],
-  htfCandles: Candle[] | null,
-  cfg: IntradayConfig,
-  segment: 'full' | 'in_sample' | 'out_of_sample' = 'full',
-): BacktestResult {
-  const htfMs = intervalMs(cfg.htfInterval);
+export function computeIndicators(candles: Candle[], cfg: Config): Indicators {
+  return {
+    ema20: emaClose(candles, cfg.emaFast),
+    ema50: emaClose(candles, cfg.emaSlow),
+    ema200: emaClose(candles, cfg.emaTrend),
+    rsi14: calcRsi(candles, cfg.rsiPeriod),
+    atr14: calcAtr(candles, cfg.atrPeriod),
+    volumeSma20: volumeSma(candles, 20),
+  };
+}
 
-  // Aggregate HTF candles from LTF if not provided
-  const htf = htfCandles ?? aggregateCandles(ltfCandles, htfMs);
+export function runBacktest(candles: Candle[], cfg: Config): BacktestResult {
+  const ind = computeIndicators(candles, cfg);
 
-  // Compute HTF regime
-  const regimes = computeRegimes(htf, cfg);
-
-  // Compute LTF indicators
-  const ind = computeLtfIndicators(ltfCandles, cfg);
-
-  // Walk forward
   const trades: Trade[] = [];
-  const equity: EquityPoint[] = [];
+  const equity: BacktestResult['equity'] = [];
   let capital = cfg.initialCapital;
-  let peakCapital = capital;
+  let peak = capital;
   let tradeId = 0;
 
-  let openPos: OpenPosition | null = null;
-  let pendingSignal: PendingSignal | null = null;
-  let cooldownUntil = 0;  // bar index: no new signals until this bar
+  // Position state
+  let inPosition = false;
+  let entryPrice = 0;
+  let entryTime = 0;
+  let entryIdx = 0;
+  let stopLoss = 0;
+  let atrAtEntry = 0;
+  let qty = 0;
+  let posSize = 0;
+  let peakPrice = 0;
+  let trailActive = false;
+  let trailStop = -Infinity;
 
-  for (let i = MIN_WARMUP; i < ltfCandles.length; i++) {
-    const candle = ltfCandles[i];
+  let pendingStop = 0;
+  let pendingAtr = 0;
+  let hasPending = false;
+  let cooldownUntil = 0;
 
-    // ── 1. Open pending position at this candle's open ──
-    if (pendingSignal && !openPos) {
-      const entryPrice = candle.open;
-      const pos = calculatePositionSize(capital, entryPrice, pendingSignal.stopLoss, cfg);
+  for (let i = WARMUP; i < candles.length; i++) {
+    const c = candles[i];
 
-      if (pos.qty > 0 && pos.positionSizeUsd > 0) {
-        openPos = {
-          direction: pendingSignal.direction,
-          strategy: pendingSignal.strategy,
-          entryPrice,
-          entryTime: candle.openTime,
-          entryIdx: i,
-          stopLoss: pendingSignal.stopLoss,
-          atr: pendingSignal.atr,
-          positionSizeUsd: pos.positionSizeUsd,
-          qty: pos.qty,
-          riskUsd: pos.riskUsd,
-          regime: pendingSignal.regime,
-          confidence: pendingSignal.confidence,
-          reasoning: pendingSignal.reasoning,
-          peakPrice: entryPrice,
-          trailActive: false,
-          trailStop: pendingSignal.direction === 'LONG' ? -Infinity : Infinity,
-          maxAdverse: 0,
-          maxFavorable: 0,
-        };
-      }
-      pendingSignal = null;
+    // 1. Open pending position at this candle's open
+    if (hasPending && !inPosition) {
+      entryPrice = c.open;
+      entryTime = c.openTime;
+      entryIdx = i;
+      stopLoss = pendingStop;
+      atrAtEntry = pendingAtr;
+
+      const riskUsd = capital * cfg.riskPerTrade;
+      const riskPerUnit = Math.abs(entryPrice - stopLoss);
+      qty = riskPerUnit > 0 ? riskUsd / riskPerUnit : 0;
+      posSize = qty * entryPrice;
+
+      peakPrice = entryPrice;
+      trailActive = false;
+      trailStop = -Infinity;
+      inPosition = qty > 0;
+      hasPending = false;
     }
 
-    // ── 2. Manage open position ──
-    if (openPos) {
-      const regime = getRegimeAtTime(regimes, candle.openTime, htfMs);
-      const currentRegime = regime?.regime ?? 'NEUTRAL';
+    // 2. Manage open position
+    if (inPosition) {
+      let exitPrice = 0;
+      let exitReason: ExitReason | null = null;
 
-      const exitCheck = checkExits(
-        openPos,
-        candle.high,
-        candle.low,
-        candle.close,
-        ind.rsi14[i],
-        currentRegime,
-        i,
-        cfg,
-      );
+      // Stop loss
+      if (c.low <= stopLoss) {
+        exitPrice = stopLoss;
+        exitReason = 'stop_loss';
+      }
+      // Trailing stop
+      else if (trailActive && c.low <= trailStop) {
+        exitPrice = trailStop;
+        exitReason = 'trailing_stop';
+      }
+      // Timeout
+      else if (i - entryIdx >= cfg.maxHoldBars) {
+        exitPrice = c.close;
+        exitReason = 'timeout';
+      }
 
-      if (exitCheck?.shouldExit) {
-        // Close position
-        const exitPrice = exitCheck.exitPrice;
-        const isLong = openPos.direction === 'LONG';
-        const rawPnl = isLong
-          ? (exitPrice - openPos.entryPrice) * openPos.qty
-          : (openPos.entryPrice - exitPrice) * openPos.qty;
-
-        const fees = calculateFees(openPos.positionSizeUsd, cfg);
-        const funding = calculateFunding(
-          openPos.positionSizeUsd,
-          openPos.entryTime,
-          candle.openTime,
-          openPos.direction,
-          cfg,
-        );
-        const netPnl = rawPnl - fees - funding;
-        const pnlPct = (netPnl / capital) * 100;
-        const initialRisk = Math.abs(openPos.entryPrice - openPos.stopLoss) * openPos.qty;
-        const rMultiple = initialRisk > 0 ? netPnl / initialRisk : 0;
+      if (exitReason) {
+        const rawPnl = (exitPrice - entryPrice) * qty;
+        const fees = posSize * cfg.feeRate * 2;
+        const netPnl = rawPnl - fees;
+        const initialRisk = Math.abs(entryPrice - stopLoss) * qty;
 
         trades.push({
           id: ++tradeId,
-          direction: openPos.direction,
-          strategy: openPos.strategy,
-          entryTime: openPos.entryTime,
-          entryPrice: openPos.entryPrice,
-          exitTime: candle.openTime,
-          exitPrice,
-          stopLoss: openPos.stopLoss,
-          positionSizeUsd: openPos.positionSizeUsd,
-          qty: openPos.qty,
-          pnl: round(netPnl),
-          pnlPct: round(pnlPct),
-          fees: round(fees),
-          fundingPaid: round(funding),
-          rMultiple: round(rMultiple),
-          holdCandles: i - openPos.entryIdx,
-          exitReason: exitCheck.reason,
-          regime: openPos.regime,
-          maxAdversePct: round(openPos.maxAdverse),
-          maxFavorablePct: round(openPos.maxFavorable),
+          entryTime,
+          entryPrice: rd(entryPrice),
+          exitTime: c.openTime,
+          exitPrice: rd(exitPrice),
+          pnl: rd(netPnl),
+          pnlPct: rd((netPnl / capital) * 100),
+          rMultiple: initialRisk > 0 ? rd(netPnl / initialRisk) : 0,
+          holdBars: i - entryIdx,
+          exitReason,
         });
 
         capital += netPnl;
-        if (capital <= 0) capital = 0; // prevent negative capital
-        openPos = null;
-        cooldownUntil = i + cfg.cooldownBars; // enforce cooldown after trade
+        if (capital <= 0) capital = 0;
+        inPosition = false;
+        cooldownUntil = i + cfg.cooldownBars;
       } else {
-        // Position still open — update trailing stop
-        updateTrailingStop(openPos, candle.high, candle.low, cfg);
+        // Update trailing stop
+        if (c.high > peakPrice) peakPrice = c.high;
+        const initialRisk = Math.abs(entryPrice - stopLoss);
+        const unrealizedR = initialRisk > 0 ? (peakPrice - entryPrice) / initialRisk : 0;
+
+        if (!trailActive && unrealizedR >= cfg.trailActivateR) {
+          trailActive = true;
+        }
+        if (trailActive) {
+          const newStop = peakPrice - cfg.trailAtrMultiple * atrAtEntry;
+          if (newStop > trailStop) trailStop = newStop;
+          if (trailStop < stopLoss) trailStop = stopLoss;
+        }
       }
     }
 
-    // ── 3. Generate signals (with cooldown + confidence filter) ──
-    if (!openPos && !pendingSignal && i >= cooldownUntil && capital > 0) {
-      const regime = getRegimeAtTime(regimes, candle.openTime, htfMs);
-      const currentRegime = regime?.regime ?? 'NEUTRAL';
-
-      // Try trend pullback first, then mean reversion
-      const signal =
-        checkTrendPullback(ltfCandles, ind, i, currentRegime, cfg) ??
-        checkMeanReversion(ltfCandles, ind, i, currentRegime, cfg);
-
-      // Only take signals above minimum confidence
+    // 3. Generate signals (with cooldown + confidence filter)
+    if (!inPosition && !hasPending && i >= cooldownUntil && capital > 0) {
+      const signal = checkSignal(candles, ind, i, cfg);
       if (signal && signal.confidence >= cfg.minConfidence) {
-        pendingSignal = signal;
+        pendingStop = signal.stopLoss;
+        pendingAtr = signal.atr;
+        hasPending = true;
       }
     }
 
-    // ── 4. Record equity ──
-    if (capital > peakCapital) peakCapital = capital;
-    const dd = peakCapital > 0 ? ((peakCapital - capital) / peakCapital) * 100 : 0;
-    equity.push({
-      time: candle.openTime,
-      equity: round(capital),
-      drawdownPct: round(dd),
-    });
+    // 4. Record equity
+    if (capital > peak) peak = capital;
+    const dd = peak > 0 ? ((peak - capital) / peak) * 100 : 0;
+    equity.push({ time: c.openTime, equity: rd(capital), drawdownPct: rd(dd) });
   }
 
-  // Compute metrics
-  const metrics = computeMetrics(trades, cfg.initialCapital, capital);
-
-  return { trades, equityCurve: equity, metrics, config: cfg as unknown as Record<string, unknown>, segment };
+  return {
+    trades,
+    metrics: computeMetrics(trades, cfg.initialCapital, capital),
+    equity,
+  };
 }
 
-// ────────────────────── Indicator Computation ──────────────────────
+// ────────────────────── Metrics ──────────────────────
 
-function computeLtfIndicators(candles: Candle[], cfg: IntradayConfig): LtfIndicators {
-  const ema20 = emaClose(candles, cfg.ltfEmaFast);
-  const ema50 = emaClose(candles, cfg.ltfEmaSlow);
-  const rsi14 = calcRsi(candles, cfg.rsiPeriod);
-  const atr14 = calcAtr(candles, cfg.atrPeriod);
-  const bb = bollingerBands(candles, cfg.bbPeriod, cfg.bbStdDev);
-  const volSma = volumeSma(candles, 20);
+function computeMetrics(trades: Trade[], initialCapital: number, finalCapital: number): Metrics {
+  const n = trades.length;
+
+  if (n === 0) {
+    return {
+      totalTrades: 0, winRate: 0, profitFactor: 0, maxDrawdownPct: 0,
+      totalReturnPct: 0, totalPnl: 0, avgRMultiple: 0, maxConsecutiveLosses: 0,
+      expectancy: 0, avgHoldBars: 0, exitReasons: {},
+    };
+  }
+
+  const wins = trades.filter(t => t.pnl > 0);
+  const losses = trades.filter(t => t.pnl <= 0);
+
+  const grossProfit = wins.reduce((s, t) => s + t.pnl, 0);
+  const grossLoss = Math.abs(losses.reduce((s, t) => s + t.pnl, 0));
+
+  // Max drawdown from cumulative PnL
+  let cumPnl = 0, ddPeak = 0, maxDd = 0;
+  let maxConsec = 0, streak = 0;
+  for (const t of trades) {
+    cumPnl += t.pnl;
+    if (cumPnl > ddPeak) ddPeak = cumPnl;
+    const dd = ddPeak - cumPnl;
+    if (dd > maxDd) maxDd = dd;
+    if (t.pnl <= 0) { streak++; if (streak > maxConsec) maxConsec = streak; }
+    else streak = 0;
+  }
+
+  const exitReasons: Record<string, number> = {};
+  for (const t of trades) exitReasons[t.exitReason] = (exitReasons[t.exitReason] ?? 0) + 1;
 
   return {
-    ema20,
-    ema50,
-    rsi14,
-    atr14,
-    bbUpper: bb.upper,
-    bbMiddle: bb.middle,
-    bbLower: bb.lower,
-    volumeSma20: volSma,
+    totalTrades: n,
+    winRate: rd((wins.length / n) * 100),
+    profitFactor: rd(grossLoss > 0 ? grossProfit / grossLoss : grossProfit > 0 ? 99 : 0),
+    maxDrawdownPct: rd(initialCapital > 0 ? (maxDd / (initialCapital + ddPeak)) * 100 : 0),
+    totalReturnPct: rd(((finalCapital - initialCapital) / initialCapital) * 100),
+    totalPnl: rd(finalCapital - initialCapital),
+    avgRMultiple: rd(trades.reduce((s, t) => s + t.rMultiple, 0) / n),
+    maxConsecutiveLosses: maxConsec,
+    expectancy: rd(trades.reduce((s, t) => s + t.pnl, 0) / n),
+    avgHoldBars: rd(trades.reduce((s, t) => s + t.holdBars, 0) / n),
+    exitReasons,
   };
 }
 
-// ────────────────────── Comparison Runner ──────────────────────
-
-export interface ComparisonResult {
-  full: BacktestResult;
-  inSample: BacktestResult;
-  outOfSample: BacktestResult;
-  trendOnly: BacktestResult;
-  mrOnly: BacktestResult;
-}
-
-/**
- * Run full comparison: in-sample, out-of-sample, trend-only, MR-only, combined.
- */
-export function runComparison(
-  ltfCandles: Candle[],
-  htfCandles: Candle[] | null,
-  cfg: IntradayConfig,
-): ComparisonResult {
-  const splitIdx = Math.floor(ltfCandles.length * cfg.inSamplePct);
-  const inSampleCandles = ltfCandles.slice(0, splitIdx);
-  const outOfSampleCandles = ltfCandles.slice(splitIdx);
-
-  // For HTF: we need to compute separately for each segment
-  // but we can pass full HTF data and let regime detection handle alignment
-  const htfMs = intervalMs(cfg.htfInterval);
-  const htf = htfCandles ?? aggregateCandles(ltfCandles, htfMs);
-
-  // Full combined backtest
-  const full = runBacktest(ltfCandles, htf, cfg, 'full');
-
-  // In-sample / out-of-sample
-  const inSample = runBacktest(inSampleCandles, htf, cfg, 'in_sample');
-  const outOfSample = runBacktest(outOfSampleCandles, htf, cfg, 'out_of_sample');
-
-  // Trend-only: set MR thresholds to impossible values
-  const trendCfg: IntradayConfig = {
-    ...cfg,
-    mrRsiOversold: -1,      // never triggers
-    mrRsiOverbought: 101,   // never triggers
-  };
-  const trendOnly = runBacktest(ltfCandles, htf, trendCfg, 'full');
-
-  // MR-only: set trend pullback to impossible values
-  const mrCfg: IntradayConfig = {
-    ...cfg,
-    pullbackMinPct: -100,   // never triggers
-    pullbackMaxPct: -100,
-    tpRsiMin: 200,          // never triggers
-    tpRsiMax: -200,
-  };
-  const mrOnly = runBacktest(ltfCandles, htf, mrCfg, 'full');
-
-  return { full, inSample, outOfSample, trendOnly, mrOnly };
-}
-
-function round(v: number): number {
+function rd(v: number): number {
   return Math.round(v * 100) / 100;
 }
