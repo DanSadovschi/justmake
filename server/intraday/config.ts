@@ -21,15 +21,14 @@ export interface IntradayConfig {
   // ── Trend Pullback Strategy (LTF) ──
   ltfEmaFast: number;          // 20
   ltfEmaSlow: number;          // 50
-  pullbackMinPct: number;      // 0.5% — min distance to EMA20
-  pullbackMaxPct: number;      // 1.0% — max distance to EMA20
+  pullbackMaxPct: number;      // 1.5% — max distance candle low/high to EMA20
   tpRsiMin: number;            // 40
   tpRsiMax: number;            // 60
   rsiPeriod: number;           // 14
 
   // ── Mean Reversion Strategy (LTF) ──
-  mrRsiOversold: number;       // 30
-  mrRsiOverbought: number;     // 70
+  mrRsiOversold: number;       // 25 (stricter)
+  mrRsiOverbought: number;     // 75 (stricter)
   bbPeriod: number;            // 20
   bbStdDev: number;            // 2.0
   mrRsiExit: number;           // 50 — exit when RSI crosses back
@@ -37,11 +36,15 @@ export interface IntradayConfig {
 
   // ── Risk Management ──
   atrPeriod: number;           // 14
-  slAtrMultiple: number;       // 1.5 × ATR
+  slAtrMultiple: number;       // 2.0 × ATR (wider stop)
   riskPerTrade: number;        // 0.01 = 1% of capital
-  trailActivateR: number;      // activate trailing after +1R
+  trailActivateR: number;      // activate trailing after +1.5R
   trailAtrMultiple: number;    // trail by 1 × ATR
   maxHoldCandles: number;      // max position duration in LTF candles
+
+  // ── Signal Quality Filters ──
+  cooldownBars: number;        // min bars between trades
+  minConfidence: number;       // 0–100, skip signals below this
 
   // ── Fees ──
   feeRate: number;             // per side (0.001 = 0.1%)
@@ -83,25 +86,27 @@ export const DEFAULT_CONFIG: IntradayConfig = {
 
   ltfEmaFast: 20,
   ltfEmaSlow: 50,
-  pullbackMinPct: 0.5,
-  pullbackMaxPct: 1.0,
+  pullbackMaxPct: 1.5,
   tpRsiMin: 40,
   tpRsiMax: 60,
   rsiPeriod: 14,
 
-  mrRsiOversold: 30,
-  mrRsiOverbought: 70,
+  mrRsiOversold: 25,       // stricter than 30
+  mrRsiOverbought: 75,     // stricter than 70
   bbPeriod: 20,
   bbStdDev: 2.0,
   mrRsiExit: 50,
   mrTargetR: 1.5,
 
   atrPeriod: 14,
-  slAtrMultiple: 1.5,
-  riskPerTrade: 0.01,
-  trailActivateR: 1.0,
+  slAtrMultiple: 2.0,      // wider stop — was 1.5, too tight for BTC
+  riskPerTrade: 0.01,       // 1% risk — NEVER change to 5%
+  trailActivateR: 1.5,      // was 1.0
   trailAtrMultiple: 1.0,
-  maxHoldCandles: 192,  // e.g. 192 × 15m = 48h
+  maxHoldCandles: 192,
+
+  cooldownBars: 12,          // 3 hours on 15m — prevent overtrading
+  minConfidence: 50,         // skip weak signals
 
   feeRate: 0.001,
   fundingRate8h: 0.0001,

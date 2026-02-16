@@ -15,12 +15,15 @@ import type { Candle, Direction, LtfIndicators, PendingSignal, Regime } from './
 // ────────────────────── Trend Pullback ──────────────────────
 
 /**
- * Trend Pullback LONG conditions:
+ * Trend Pullback LONG:
  *   1. HTF bias = LONG
- *   2. EMA20 > EMA50 on LTF
- *   3. Price pulls back to EMA20 (within pullbackMinPct–pullbackMaxPct)
- *   4. RSI between tpRsiMin–tpRsiMax
- *   5. Close > previous candle's high (confirmation)
+ *   2. LTF: EMA20 > EMA50 (local trend alignment)
+ *   3. Candle's low touched or came within pullbackMaxPct of EMA20
+ *   4. RSI in neutral zone (40–60) — not overbought
+ *   5. Close > previous candle's high (bounce confirmation)
+ *
+ * Trend Pullback SHORT:
+ *   Mirror conditions.
  */
 export function checkTrendPullback(
   candles: Candle[],
@@ -29,85 +32,102 @@ export function checkTrendPullback(
   regime: Regime,
   cfg: IntradayConfig,
 ): PendingSignal | null {
-  if (idx < 1) return null;
+  if (idx < 2) return null;
   if (regime !== 'LONG' && regime !== 'SHORT') return null;
 
   const curr = candles[idx];
   const prev = candles[idx - 1];
+  const ema20 = ind.ema20[idx];
+  const ema50 = ind.ema50[idx];
 
   if (regime === 'LONG') {
-    // EMA20 > EMA50
-    if (ind.ema20[idx] <= ind.ema50[idx]) return null;
+    // Local trend: EMA20 > EMA50
+    if (ema20 <= ema50) return null;
 
-    // Price pulled back to EMA20: distance from close to EMA20
-    const distPct = ((curr.close - ind.ema20[idx]) / ind.ema20[idx]) * 100;
-    // For a long pullback, price should be near (slightly above or touching) EMA20
-    // We check if the low reached within range of EMA20
-    const lowDist = ((curr.low - ind.ema20[idx]) / ind.ema20[idx]) * 100;
-    if (lowDist > cfg.pullbackMaxPct || distPct > cfg.pullbackMaxPct * 2) return null;
-    if (Math.abs(lowDist) > cfg.pullbackMaxPct && lowDist < -cfg.pullbackMaxPct) return null;
+    // Pullback: candle's low came close to EMA20 from above
+    // Distance = how far the low is from EMA20 (as % of EMA20)
+    const lowToEma = ((curr.low - ema20) / ema20) * 100;
+
+    // Low should be within [-maxPct, +maxPct] of EMA20
+    // Negative = dipped below EMA20 slightly, Positive = stayed above
+    if (lowToEma > cfg.pullbackMaxPct) return null;   // didn't pull back enough
+    if (lowToEma < -cfg.pullbackMaxPct) return null;   // broke too far below
+
+    // Close must be ABOVE EMA20 (bounce back up)
+    if (curr.close <= ema20) return null;
 
     // RSI in neutral zone
     if (ind.rsi14[idx] < cfg.tpRsiMin || ind.rsi14[idx] > cfg.tpRsiMax) return null;
 
-    // Confirmation: close > previous high
+    // Confirmation: close > previous candle's high
     if (curr.close <= prev.high) return null;
 
-    // Stop loss: below EMA20 by 1.5 × ATR
-    const stop = curr.close - cfg.slAtrMultiple * ind.atr14[idx];
+    // Stop loss: 2.0 × ATR below entry
+    const atr = ind.atr14[idx];
+    const stop = curr.close - cfg.slAtrMultiple * atr;
+
+    const confidence = computeConfidence(candles, ind, idx, 'LONG', cfg);
 
     return {
       direction: 'LONG',
       strategy: 'trend_pullback',
       stopLoss: stop,
-      atr: ind.atr14[idx],
+      atr,
       regime,
-      confidence: computeTrendConfidence(ind, idx, 'LONG', cfg),
+      confidence,
       reasoning: {
         strategy: 'trend_pullback',
         direction: 'LONG',
-        ema20: round(ind.ema20[idx]),
-        ema50: round(ind.ema50[idx]),
-        rsi: round(ind.rsi14[idx]),
-        pullbackPct: round(lowDist),
-        atr: round(ind.atr14[idx]),
+        ema20: r(ema20),
+        ema50: r(ema50),
+        rsi: r(ind.rsi14[idx]),
+        pullbackPct: r(lowToEma),
+        atr: r(atr),
+        close: r(curr.close),
+        prevHigh: r(prev.high),
       },
     };
   }
 
-  // SHORT pullback
   if (regime === 'SHORT') {
-    if (ind.ema20[idx] >= ind.ema50[idx]) return null;
+    if (ema20 >= ema50) return null;
 
-    // Price pulled back up to EMA20
-    const distPct = ((ind.ema20[idx] - curr.close) / ind.ema20[idx]) * 100;
-    const highDist = ((ind.ema20[idx] - curr.high) / ind.ema20[idx]) * 100;
-    if (highDist > cfg.pullbackMaxPct || distPct > cfg.pullbackMaxPct * 2) return null;
-    if (Math.abs(highDist) > cfg.pullbackMaxPct && highDist < -cfg.pullbackMaxPct) return null;
+    // Pullback: candle's high came close to EMA20 from below
+    const highToEma = ((ema20 - curr.high) / ema20) * 100;
 
-    // RSI in neutral zone
+    if (highToEma > cfg.pullbackMaxPct) return null;
+    if (highToEma < -cfg.pullbackMaxPct) return null;
+
+    // Close must be BELOW EMA20
+    if (curr.close >= ema20) return null;
+
     if (ind.rsi14[idx] < cfg.tpRsiMin || ind.rsi14[idx] > cfg.tpRsiMax) return null;
 
-    // Confirmation: close < previous low
+    // Confirmation: close < previous candle's low
     if (curr.close >= prev.low) return null;
 
-    const stop = curr.close + cfg.slAtrMultiple * ind.atr14[idx];
+    const atr = ind.atr14[idx];
+    const stop = curr.close + cfg.slAtrMultiple * atr;
+
+    const confidence = computeConfidence(candles, ind, idx, 'SHORT', cfg);
 
     return {
       direction: 'SHORT',
       strategy: 'trend_pullback',
       stopLoss: stop,
-      atr: ind.atr14[idx],
+      atr,
       regime,
-      confidence: computeTrendConfidence(ind, idx, 'SHORT', cfg),
+      confidence,
       reasoning: {
         strategy: 'trend_pullback',
         direction: 'SHORT',
-        ema20: round(ind.ema20[idx]),
-        ema50: round(ind.ema50[idx]),
-        rsi: round(ind.rsi14[idx]),
-        pullbackPct: round(highDist),
-        atr: round(ind.atr14[idx]),
+        ema20: r(ema20),
+        ema50: r(ema50),
+        rsi: r(ind.rsi14[idx]),
+        pullbackPct: r(highToEma),
+        atr: r(atr),
+        close: r(curr.close),
+        prevLow: r(prev.low),
       },
     };
   }
@@ -119,14 +139,12 @@ export function checkTrendPullback(
 
 /**
  * Mean Reversion LONG:
- *   - RSI < 30 (oversold)
- *   - Price below lower Bollinger Band
- *   - Volume > SMA(20) volume
+ *   - RSI < 25 (deeply oversold)
+ *   - Close below lower Bollinger Band
+ *   - Volume > 1.2 × SMA(20) volume (conviction)
  *
  * Mean Reversion SHORT:
- *   - RSI > 70 (overbought)
- *   - Price above upper Bollinger Band
- *   - Volume > SMA(20) volume
+ *   Mirror conditions.
  */
 export function checkMeanReversion(
   candles: Candle[],
@@ -138,26 +156,29 @@ export function checkMeanReversion(
   if (regime !== 'RANGE') return null;
 
   const curr = candles[idx];
+  const volRatio = ind.volumeSma20[idx] > 0 ? curr.volume / ind.volumeSma20[idx] : 0;
 
   // LONG mean reversion
   if (ind.rsi14[idx] < cfg.mrRsiOversold &&
       curr.close < ind.bbLower[idx] &&
-      curr.volume > ind.volumeSma20[idx]) {
-    const stop = curr.close - cfg.slAtrMultiple * ind.atr14[idx];
+      volRatio > 1.2) {
+    const atr = ind.atr14[idx];
+    const stop = curr.close - cfg.slAtrMultiple * atr;
+    const confidence = computeConfidence(candles, ind, idx, 'LONG', cfg);
     return {
       direction: 'LONG',
       strategy: 'mean_reversion',
       stopLoss: stop,
-      atr: ind.atr14[idx],
+      atr,
       regime,
-      confidence: computeMrConfidence(ind, idx, 'LONG', cfg),
+      confidence,
       reasoning: {
         strategy: 'mean_reversion',
         direction: 'LONG',
-        rsi: round(ind.rsi14[idx]),
-        bbLower: round(ind.bbLower[idx]),
-        close: round(curr.close),
-        volumeRatio: round(curr.volume / ind.volumeSma20[idx]),
+        rsi: r(ind.rsi14[idx]),
+        bbLower: r(ind.bbLower[idx]),
+        close: r(curr.close),
+        volumeRatio: r(volRatio),
       },
     };
   }
@@ -165,22 +186,24 @@ export function checkMeanReversion(
   // SHORT mean reversion
   if (ind.rsi14[idx] > cfg.mrRsiOverbought &&
       curr.close > ind.bbUpper[idx] &&
-      curr.volume > ind.volumeSma20[idx]) {
-    const stop = curr.close + cfg.slAtrMultiple * ind.atr14[idx];
+      volRatio > 1.2) {
+    const atr = ind.atr14[idx];
+    const stop = curr.close + cfg.slAtrMultiple * atr;
+    const confidence = computeConfidence(candles, ind, idx, 'SHORT', cfg);
     return {
       direction: 'SHORT',
       strategy: 'mean_reversion',
       stopLoss: stop,
-      atr: ind.atr14[idx],
+      atr,
       regime,
-      confidence: computeMrConfidence(ind, idx, 'SHORT', cfg),
+      confidence,
       reasoning: {
         strategy: 'mean_reversion',
         direction: 'SHORT',
-        rsi: round(ind.rsi14[idx]),
-        bbUpper: round(ind.bbUpper[idx]),
-        close: round(curr.close),
-        volumeRatio: round(curr.volume / ind.volumeSma20[idx]),
+        rsi: r(ind.rsi14[idx]),
+        bbUpper: r(ind.bbUpper[idx]),
+        close: r(curr.close),
+        volumeRatio: r(volRatio),
       },
     };
   }
@@ -190,93 +213,51 @@ export function checkMeanReversion(
 
 // ────────────────────── Confidence Scoring ──────────────────────
 
-function computeTrendConfidence(
+/**
+ * Unified confidence score (0–100).
+ * Uses actual candle data + indicators.
+ */
+function computeConfidence(
+  candles: Candle[],
   ind: LtfIndicators,
   idx: number,
   dir: Direction,
   cfg: IntradayConfig,
 ): number {
   let score = 0;
+  const curr = candles[idx];
 
-  // EMA spread strength (0–25)
+  // ── EMA spread strength (0–25) ──
   const spread = Math.abs(ind.ema20[idx] - ind.ema50[idx]) / ind.ema50[idx] * 100;
-  if (spread > 1.5) score += 25;
-  else if (spread > 0.5) score += 15;
-  else score += 5;
+  if (spread > 2.0) score += 25;
+  else if (spread > 1.0) score += 18;
+  else if (spread > 0.3) score += 10;
 
-  // RSI positioning (0–25)
-  const rsi = ind.rsi14[idx];
-  if (dir === 'LONG' && rsi >= 40 && rsi <= 55) score += 25;
-  else if (dir === 'SHORT' && rsi >= 45 && rsi <= 60) score += 25;
-  else if (rsi >= cfg.tpRsiMin && rsi <= cfg.tpRsiMax) score += 15;
-
-  // Volume (0–25)
-  const volRatio = ind.volumeSma20[idx] > 0
-    ? candles_not_available_use_atr(ind, idx)
-    : 1;
-  if (volRatio >= 1.5) score += 25;
-  else if (volRatio >= 1.0) score += 15;
-
-  // ATR stability (0–25) — prefer moderate volatility
-  // Comparing ATR to price gives volatility percentage
-  const atrPct = (ind.atr14[idx] / ind.ema20[idx]) * 100;
-  if (atrPct >= 0.5 && atrPct <= 2.0) score += 25;  // sweet spot
-  else if (atrPct < 0.5) score += 10;                 // low vol
-  else score += 5;                                     // high vol
-
-  return Math.min(100, score);
-}
-
-// Helper — we don't have raw candle volume in the indicator struct,
-// so we approximate volume ratio from the volumeSma20 array
-function candles_not_available_use_atr(_ind: LtfIndicators, _idx: number): number {
-  // volumeSma20 already computed; we can infer ratio isn't available here
-  // without the raw candle. Return 1.2 as neutral.
-  // The actual check uses raw candle.volume vs ind.volumeSma20 in backtest.
-  return 1.2;
-}
-
-function computeMrConfidence(
-  ind: LtfIndicators,
-  idx: number,
-  dir: Direction,
-  _cfg: IntradayConfig,
-): number {
-  let score = 0;
-
-  // RSI extremity (0–35) — more extreme = higher confidence
+  // ── RSI positioning (0–25) ──
   const rsi = ind.rsi14[idx];
   if (dir === 'LONG') {
-    if (rsi < 20) score += 35;
-    else if (rsi < 25) score += 25;
-    else score += 15;
+    if (rsi >= 40 && rsi <= 55) score += 25;        // sweet spot for long
+    else if (rsi >= cfg.tpRsiMin && rsi <= cfg.tpRsiMax) score += 15;
   } else {
-    if (rsi > 80) score += 35;
-    else if (rsi > 75) score += 25;
-    else score += 15;
+    if (rsi >= 45 && rsi <= 60) score += 25;
+    else if (rsi >= cfg.tpRsiMin && rsi <= cfg.tpRsiMax) score += 15;
   }
 
-  // BB penetration depth (0–35)
-  const bbWidth = ind.bbUpper[idx] - ind.bbLower[idx];
-  if (bbWidth > 0) {
-    const price = (ind.ema20[idx]); // proxy for current close
-    const penetration = dir === 'LONG'
-      ? (ind.bbLower[idx] - price) / bbWidth
-      : (price - ind.bbUpper[idx]) / bbWidth;
-    if (penetration > 0.2) score += 35;
-    else if (penetration > 0.1) score += 25;
-    else score += 15;
-  }
+  // ── Volume confirmation (0–25) ──
+  const volRatio = ind.volumeSma20[idx] > 0 ? curr.volume / ind.volumeSma20[idx] : 1;
+  if (volRatio >= 2.0) score += 25;
+  else if (volRatio >= 1.5) score += 20;
+  else if (volRatio >= 1.0) score += 10;
 
-  // ATR (0–30) — higher vol = bigger reversion potential
+  // ── ATR / volatility (0–25) ──
   const atrPct = (ind.atr14[idx] / ind.ema20[idx]) * 100;
-  if (atrPct >= 1.0) score += 30;
-  else if (atrPct >= 0.5) score += 20;
-  else score += 10;
+  if (atrPct >= 0.3 && atrPct <= 2.0) score += 25;   // moderate vol = best
+  else if (atrPct < 0.3) score += 5;                   // too quiet
+  else score += 10;                                     // high vol ok but risky
 
   return Math.min(100, score);
 }
 
-function round(v: number): number {
+function r(v: number): number {
   return Math.round(v * 100) / 100;
 }

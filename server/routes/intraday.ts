@@ -12,6 +12,7 @@ import {
   getLastResult,
   getLastRunTime,
   getDefaultConfig,
+  scanLiveSignal,
 } from '../intraday/engine.js';
 
 export const intradayRouter = Router();
@@ -121,4 +122,15 @@ intradayRouter.get('/equity', (_req, res) => {
 // GET /api/intraday/config — get default config
 intradayRouter.get('/config', (_req, res) => {
   res.json(getDefaultConfig());
+});
+
+// GET /api/intraday/live-signal — scan current market for actionable signal
+intradayRouter.get('/live-signal', async (_req, res) => {
+  try {
+    const result = await scanLiveSignal();
+    res.json({ success: true, ...result });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Unknown error';
+    res.status(500).json({ success: false, error: message });
+  }
 });

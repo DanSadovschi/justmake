@@ -74,6 +74,7 @@ export function runBacktest(
 
   let openPos: OpenPosition | null = null;
   let pendingSignal: PendingSignal | null = null;
+  let cooldownUntil = 0;  // bar index: no new signals until this bar
 
   for (let i = MIN_WARMUP; i < ltfCandles.length; i++) {
     const candle = ltfCandles[i];
@@ -169,15 +170,17 @@ export function runBacktest(
         });
 
         capital += netPnl;
+        if (capital <= 0) capital = 0; // prevent negative capital
         openPos = null;
+        cooldownUntil = i + cfg.cooldownBars; // enforce cooldown after trade
       } else {
         // Position still open — update trailing stop
         updateTrailingStop(openPos, candle.high, candle.low, cfg);
       }
     }
 
-    // ── 3. Generate signals (only if no open position and no pending signal) ──
-    if (!openPos && !pendingSignal) {
+    // ── 3. Generate signals (with cooldown + confidence filter) ──
+    if (!openPos && !pendingSignal && i >= cooldownUntil && capital > 0) {
       const regime = getRegimeAtTime(regimes, candle.openTime, htfMs);
       const currentRegime = regime?.regime ?? 'NEUTRAL';
 
@@ -186,7 +189,8 @@ export function runBacktest(
         checkTrendPullback(ltfCandles, ind, i, currentRegime, cfg) ??
         checkMeanReversion(ltfCandles, ind, i, currentRegime, cfg);
 
-      if (signal) {
+      // Only take signals above minimum confidence
+      if (signal && signal.confidence >= cfg.minConfidence) {
         pendingSignal = signal;
       }
     }
