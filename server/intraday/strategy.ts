@@ -1,5 +1,5 @@
 /**
- * Seven strategies: Pullback, Breakout, Momentum, Momentum+ADX, MACD Zero, BBand Squeeze, Scoring.
+ * Eight strategies: Pullback, Breakout, Momentum, Momentum+ADX, MACD Zero, BBand Squeeze, Scoring, Scoring Simple.
  * All LONG only. Entry at NEXT candle open. No lookahead.
  */
 
@@ -21,7 +21,8 @@ export function checkSignal(
     case 'momentum_adx':  return checkMomentumAdx(candles, ind, idx, cfg);
     case 'macd_zero':     return checkMacdZero(candles, ind, idx, cfg);
     case 'bband_squeeze': return checkBbandSqueeze(candles, ind, idx, cfg);
-    case 'scoring':       return checkScoring(candles, ind, idx, cfg);
+    case 'scoring':        return checkScoring(candles, ind, idx, cfg);
+    case 'scoring_simple': return checkScoringSimple(candles, ind, idx, cfg);
   }
 }
 
@@ -282,6 +283,62 @@ function checkScoring(
       adx: rd(ind.adx[idx]),
       rsi: rd(ind.rsi14[idx]),
       atrPct: rd(atrPct),
+      ema200: rd(ema200),
+    },
+  };
+}
+
+// ══════════════════════════════════════════════════════════
+// 8. SCORING SIMPLE (3 factors only)
+//    Regime gate: price > EMA200 (toggleable).
+//    Three factors — removes always-true breakout & ATR% factors.
+//    A) Trend direction:  emaFast > emaSlow
+//    B) Trend strength:   ADX > adxThreshold
+//    C) Momentum safe:    RSI < rsiMax (not overbought)
+//    Enter LONG only if sum >= scoreThreshold.
+// ══════════════════════════════════════════════════════════
+
+function checkScoringSimple(
+  candles: Candle[], ind: Indicators, idx: number, cfg: Config,
+): Signal | null {
+  if (idx < 2) return null;
+  const curr = candles[idx];
+  const ema200 = ind.ema200[idx];
+  const atrVal = ind.atr14[idx];
+
+  // Regime gate
+  if (!trendGate(curr.close, ema200, cfg)) return null;
+
+  // Factor A: trend direction
+  const fA = ind.ema20[idx] > ind.ema50[idx] ? 1 : 0;
+
+  // Factor B: trend strength
+  const fB = ind.adx[idx] >= cfg.adxThreshold ? 1 : 0;
+
+  // Factor C: momentum not overextended
+  const fC = ind.rsi14[idx] < cfg.rsiMax ? 1 : 0;
+
+  const total = fA + fB + fC;
+  if (total < cfg.scoreThreshold) return null;
+
+  const stopLoss = curr.close - cfg.slAtrMultiple * atrVal;
+  const risk = curr.close - stopLoss;
+  if (risk <= 0) return null;
+  const takeProfit = curr.close + risk * cfg.minRiskReward;
+
+  return {
+    entryZone: rd(curr.close),
+    stopLoss: rd(stopLoss),
+    takeProfit: rd(takeProfit),
+    atr: rd(atrVal),
+    confidence: Math.round(total * (100 / 3)), // 0-100 scale: 3 factors
+    reasoning: {
+      strategy: 'scoring_simple',
+      score: total,
+      scoreThreshold: cfg.scoreThreshold,
+      fA_trend: fA, fB_adx: fB, fC_rsi: fC,
+      adx: rd(ind.adx[idx]),
+      rsi: rd(ind.rsi14[idx]),
       ema200: rd(ema200),
     },
   };

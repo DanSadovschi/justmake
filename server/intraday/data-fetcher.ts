@@ -13,8 +13,8 @@ function sleep(ms: number): Promise<void> {
   return new Promise(r => setTimeout(r, ms));
 }
 
-async function fetchPage(interval: Interval, startTime: number, endTime: number): Promise<Candle[]> {
-  const url = `https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=${interval}&startTime=${startTime}&endTime=${endTime}&limit=${BINANCE_LIMIT}`;
+async function fetchPage(symbol: string, interval: Interval, startTime: number, endTime: number): Promise<Candle[]> {
+  const url = `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&startTime=${startTime}&endTime=${endTime}&limit=${BINANCE_LIMIT}`;
 
   for (let attempt = 0; attempt < 3; attempt++) {
     const res = await fetch(url);
@@ -42,25 +42,26 @@ async function fetchPage(interval: Interval, startTime: number, endTime: number)
 }
 
 /**
- * Fetch BTC/USDT candles from Binance.
+ * Fetch candles from Binance for any symbol.
  * Paginates forward from startTime.
  */
 export async function fetchCandles(
   lookbackDays: number,
   interval: Interval = '1h',
+  symbol: string = 'BTCUSDT',
 ): Promise<Candle[]> {
   const now = Date.now();
   const startMs = now - lookbackDays * 86_400_000;
   const all: Candle[] = [];
   let cursor = startMs;
 
-  console.log(`[data] Fetching BTCUSDT ${interval} from Binance (${lookbackDays} days)...`);
+  console.log(`[data] Fetching ${symbol} ${interval} from Binance (${lookbackDays} days)...`);
 
   const maxPages = 200; // 200 × 1000 = 200K candles (enough for 4yr of 15m)
   for (let p = 0; p < maxPages; p++) {
     if (p > 0) await sleep(300);
 
-    const batch = await fetchPage(interval, cursor, now);
+    const batch = await fetchPage(symbol, interval, cursor, now);
     if (batch.length === 0) break;
 
     all.push(...batch);

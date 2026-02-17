@@ -4,7 +4,7 @@
 
 import type { Interval } from './data-fetcher.js';
 
-export type StrategyType = 'pullback' | 'breakout' | 'momentum' | 'momentum_adx' | 'macd_zero' | 'bband_squeeze' | 'scoring';
+export type StrategyType = 'pullback' | 'breakout' | 'momentum' | 'momentum_adx' | 'macd_zero' | 'bband_squeeze' | 'scoring' | 'scoring_simple';
 
 export interface Config {
   symbol: string;

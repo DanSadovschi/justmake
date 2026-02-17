@@ -62,6 +62,7 @@ function printConfig(cfg: Config): void {
   if (cfg.strategy === 'macd_zero') console.log(`  MACD: ${cfg.macdFast}/${cfg.macdSlow}/${cfg.macdSignalPeriod}`);
   if (cfg.strategy === 'bband_squeeze') console.log(`  BBand: period=${cfg.bbPeriod} stdDev=${cfg.bbStdDev} squeezePctile=${cfg.bbSqueezePctile}%`);
   if (cfg.strategy === 'scoring') console.log(`  Scoring: threshold=${cfg.scoreThreshold}/5  ADX>=${cfg.adxThreshold}  breakout=${cfg.breakoutPeriod}  ATR%=[${cfg.minAtrPct}-${cfg.maxAtrPct}]  EMA200=${cfg.useEma200Filter}`);
+  if (cfg.strategy === 'scoring_simple') console.log(`  Scoring Simple: threshold=${cfg.scoreThreshold}/3  ADX>=${cfg.adxThreshold}  RSI<${cfg.rsiMax}  EMA200=${cfg.useEma200Filter}`);
   console.log(`  Risk: ${cfg.riskPerTrade * 100}%/trade  Min R:R: 1:${cfg.minRiskReward}`);
   console.log(`  MaxHold: ${cfg.maxHoldBars}bars  Cooldown: ${cfg.cooldownBars}bars  MinConf: ${cfg.minConfidence}`);
   console.log(`  Fees: ${cfg.feeRate * 100}%/side  Capital: $${cfg.initialCapital}`);
@@ -94,7 +95,7 @@ async function main() {
   printConfig(cfg);
 
   console.log('\nFetching data...');
-  const candles = await fetchCandles(cfg.lookbackDays, cfg.interval);
+  const candles = await fetchCandles(cfg.lookbackDays, cfg.interval, cfg.symbol);
 
   if (candles.length < 220) {
     console.error(`Not enough candles: ${candles.length} (need 220+)`);

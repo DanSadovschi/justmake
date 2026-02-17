@@ -2,7 +2,7 @@
  * Multi-timeframe, multi-strategy parameter grid search.
  * Run: npx tsx optimize.ts [lookbackDays]
  *
- * Tests 15m, 1h, 4h × 6 strategies × param grid.
+ * Tests 15m, 1h, 4h × 8 strategies × param grid.
  * Includes per-year breakdown, stability analysis, EMA200 A/B test.
  *
  * Scoring: conservative — penalizes drawdown, rewards trade count logarithmically.
@@ -15,7 +15,7 @@ import { runBacktest, computeIndicators } from './server/intraday/backtest.js';
 import type { Candle, Metrics, Trade } from './server/intraday/types.js';
 
 const INTERVALS: Interval[] = ['15m', '1h', '4h'];
-const STRATEGIES: StrategyType[] = ['breakout', 'momentum', 'pullback', 'momentum_adx', 'macd_zero', 'bband_squeeze', 'scoring'];
+const STRATEGIES: StrategyType[] = ['breakout', 'momentum', 'pullback', 'momentum_adx', 'macd_zero', 'bband_squeeze', 'scoring', 'scoring_simple'];
 
 // Shared params (all strategies)
 const SHARED = {
@@ -56,6 +56,13 @@ const SPECIFIC: Record<StrategyType, Record<string, number[]>> = {
     scoreThreshold: [3, 4],
     adxThreshold:   [20, 25],
     breakoutPeriod:  [10, 20],
+  },
+  scoring_simple: {
+    emaFast:        [10, 20],
+    emaSlow:        [30, 50],
+    adxThreshold:   [20, 25, 30],
+    rsiMax:         [60, 65, 70],
+    scoreThreshold: [2, 3],
   },
 };
 
@@ -152,42 +159,50 @@ function scoringFactorHitRate(
   cfg: Config,
   trades: Trade[],
 ): Record<string, number> | null {
-  if (cfg.strategy !== 'scoring' || trades.length === 0) return null;
+  if (cfg.strategy !== 'scoring' && cfg.strategy !== 'scoring_simple') return null;
+  if (trades.length === 0) return null;
   const ind = computeIndicators(candles, cfg);
+  const isSimple = cfg.strategy === 'scoring_simple';
   const hits = { A_trend: 0, B_adx: 0, C_rsi: 0, D_breakout: 0, E_atrPct: 0 };
   let matched = 0;
 
   for (const t of trades) {
-    // Find entry candle, signal was on the bar before
     let sigIdx = -1;
     for (let i = 1; i < candles.length; i++) {
       if (candles[i].openTime === t.entryTime) { sigIdx = i - 1; break; }
     }
-    if (sigIdx < cfg.breakoutPeriod) continue;
+    if (sigIdx < 2) continue;
+    if (!isSimple && sigIdx < cfg.breakoutPeriod) continue;
     matched++;
 
     if (ind.ema20[sigIdx] > ind.ema50[sigIdx]) hits.A_trend++;
     if (ind.adx[sigIdx] >= cfg.adxThreshold) hits.B_adx++;
     if (ind.rsi14[sigIdx] < cfg.rsiMax) hits.C_rsi++;
 
-    let hh = -Infinity;
-    for (let j = sigIdx - cfg.breakoutPeriod; j < sigIdx; j++) {
-      if (candles[j].high > hh) hh = candles[j].high;
-    }
-    if (candles[sigIdx].close > hh) hits.D_breakout++;
+    if (!isSimple) {
+      let hh = -Infinity;
+      for (let j = sigIdx - cfg.breakoutPeriod; j < sigIdx; j++) {
+        if (candles[j].high > hh) hh = candles[j].high;
+      }
+      if (candles[sigIdx].close > hh) hits.D_breakout++;
 
-    const atrPct = ind.atr14[sigIdx] > 0 ? (ind.atr14[sigIdx] / candles[sigIdx].close) * 100 : 0;
-    if (atrPct >= cfg.minAtrPct && atrPct <= cfg.maxAtrPct) hits.E_atrPct++;
+      const atrPct = ind.atr14[sigIdx] > 0 ? (ind.atr14[sigIdx] / candles[sigIdx].close) * 100 : 0;
+      if (atrPct >= cfg.minAtrPct && atrPct <= cfg.maxAtrPct) hits.E_atrPct++;
+    }
   }
 
   if (matched === 0) return null;
-  return {
+
+  const result: Record<string, number> = {
     A_trend: rd((hits.A_trend / matched) * 100),
     B_adx: rd((hits.B_adx / matched) * 100),
     C_rsi: rd((hits.C_rsi / matched) * 100),
-    D_breakout: rd((hits.D_breakout / matched) * 100),
-    E_atrPct: rd((hits.E_atrPct / matched) * 100),
   };
+  if (!isSimple) {
+    result.D_breakout = rd((hits.D_breakout / matched) * 100);
+    result.E_atrPct = rd((hits.E_atrPct / matched) * 100);
+  }
+  return result;
 }
 
 // ── Stability check ──
@@ -254,7 +269,7 @@ async function main() {
   const candlesByInterval = new Map<Interval, Candle[]>();
   for (const interval of INTERVALS) {
     console.log('');
-    const candles = await fetchCandles(lookback, interval);
+    const candles = await fetchCandles(lookback, interval, DEFAULT_CONFIG.symbol);
     candlesByInterval.set(interval, candles);
   }
 
@@ -354,8 +369,8 @@ async function main() {
     }
     console.log(`        ${yearParts.join('  |  ')}`);
 
-    // Factor hit-rate for scoring strategy
-    if (r.strategy === 'scoring') {
+    // Factor hit-rate for scoring strategies
+    if (r.strategy === 'scoring' || r.strategy === 'scoring_simple') {
       const candles = candlesByInterval.get(r.interval)!;
       const numP: Record<string, number> = {};
       for (const [k, v] of Object.entries(r.params)) {
@@ -366,6 +381,12 @@ async function main() {
       if (hitRates) {
         const parts = Object.entries(hitRates).map(([k, v]) => `${k}:${v}%`).join('  ');
         console.log(`        Factors at entry: ${parts}`);
+        // Redundant factor warning: >=95% hit rate means the factor is not filtering
+        const redundant = Object.entries(hitRates).filter(([, v]) => v >= 95);
+        if (redundant.length > 0) {
+          const names = redundant.map(([k, v]) => `${k}(${v}%)`).join(', ');
+          console.log(`        ⚠ REDUNDANT FACTORS (>=95% always true): ${names}`);
+        }
       }
     }
 
