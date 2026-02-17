@@ -31,7 +31,8 @@ export async function scanLiveSignal(
   const cfg: Config = { ...DEFAULT_CONFIG, ...overrides };
 
   // 60 days of 1H = ~1440 candles, enough for EMA200 warmup
-  const candles = await fetchCandles(60, cfg.interval);
+  console.log(`[DATA] symbol=${cfg.symbol} interval=${cfg.interval} days=60`);
+  const candles = await fetchCandles(60, cfg.interval, cfg.symbol);
   if (candles.length < 210) {
     throw new Error(`Not enough data: ${candles.length} candles (need 210+)`);
   }

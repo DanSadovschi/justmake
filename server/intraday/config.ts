@@ -67,8 +67,9 @@ export interface Config {
   cooldownBars: number;   // 6 = 6 hours
   minConfidence: number;  // 50
 
-  // Fees
-  feeRate: number;        // 0.001 = 0.1% per side
+  // Fees & slippage
+  feeRate: number;        // 0.0004 = 0.04% per side (Binance spot)
+  slippageBps: number;    // basis points, e.g. 5 = 0.05%
 
   // Backtest
   initialCapital: number;
@@ -123,7 +124,8 @@ export const DEFAULT_CONFIG: Config = {
   cooldownBars: 6,
   minConfidence: 50,
 
-  feeRate: 0.001,
+  feeRate: 0.0004,
+  slippageBps: 5,
 
   initialCapital: 10_000,
   lookbackDays: 365,

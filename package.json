@@ -9,11 +9,14 @@
     "bt:365": "tsx run.ts --lookbackDays=365",
     "optimize": "tsx optimize.ts",
     "portability": "tsx portability.ts",
-    "check": "tsc -b --noEmit"
+    "check": "tsc -b --noEmit",
+    "test": "vitest run"
   },
   "devDependencies": {
     "@types/node": "^24.10.1",
     "tsx": "^4.21.0",
-    "typescript": "~5.9.3"
+    "typescript": "~5.9.3",
+    "vitest": "^4.0.18",
+    "zod": "^4.3.6"
   }
 }

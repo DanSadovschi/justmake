@@ -4,6 +4,7 @@
  */
 
 import type { Candle } from './types.js';
+import { loadCachedCandles, saveCachedCandles } from './cache.js';
 
 const BINANCE_LIMIT = 1000;
 
@@ -52,10 +53,19 @@ export async function fetchCandles(
 ): Promise<Candle[]> {
   const now = Date.now();
   const startMs = now - lookbackDays * 86_400_000;
-  const all: Candle[] = [];
-  let cursor = startMs;
+
+  console.log(`[DATA] symbol=${symbol} interval=${interval} days=${lookbackDays}`);
+
+  // Check cache first (keyed by rounded hour boundaries for reasonable cache hits)
+  const cacheStart = Math.floor(startMs / 3_600_000) * 3_600_000;
+  const cacheEnd   = Math.floor(now / 3_600_000) * 3_600_000;
+  const cached = loadCachedCandles(symbol, interval, cacheStart, cacheEnd);
+  if (cached) return cached;
 
   console.log(`[data] Fetching ${symbol} ${interval} from Binance (${lookbackDays} days)...`);
+
+  const all: Candle[] = [];
+  let cursor = startMs;
 
   const maxPages = 200; // 200 × 1000 = 200K candles (enough for 4yr of 15m)
   for (let p = 0; p < maxPages; p++) {
@@ -78,5 +88,9 @@ export async function fetchCandles(
     .sort((a, b) => a.openTime - b.openTime);
 
   console.log(`[data] Got ${candles.length} ${interval} candles`);
+
+  // Save to cache
+  saveCachedCandles(symbol, interval, cacheStart, cacheEnd, candles);
+
   return candles;
 }

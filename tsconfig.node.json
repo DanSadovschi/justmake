@@ -22,5 +22,5 @@
     "noFallthroughCasesInSwitch": true,
     "noUncheckedSideEffectImports": true
   },
-  "include": ["run.ts", "optimize.ts", "server"]
+  "include": ["run.ts", "optimize.ts", "portability.ts", "vitest.config.ts", "server", "tests"]
 }

@@ -56,7 +56,6 @@ export function runBacktest(candles: Candle[], cfg: Config): BacktestResult {
   let stopLoss = 0;
   let atrAtEntry = 0;
   let qty = 0;
-  let posSize = 0;
   let peakPrice = 0;
   let trailActive = false;
   let trailStop = -Infinity;
@@ -70,7 +69,8 @@ export function runBacktest(candles: Candle[], cfg: Config): BacktestResult {
 
     // 1. Open pending position at this candle's open
     if (hasPending && !inPosition) {
-      entryPrice = c.open;
+      // Apply slippage: LONG entry fills worse (higher)
+      entryPrice = c.open * (1 + cfg.slippageBps / 10_000);
       entryTime = c.openTime;
       entryIdx = i;
       atrAtEntry = pendingAtr;
@@ -80,7 +80,6 @@ export function runBacktest(candles: Candle[], cfg: Config): BacktestResult {
       const riskUsd = capital * cfg.riskPerTrade;
       const riskPerUnit = Math.abs(entryPrice - stopLoss);
       qty = riskPerUnit > 0 ? riskUsd / riskPerUnit : 0;
-      posSize = qty * entryPrice;
 
       peakPrice = entryPrice;
       trailActive = false;
@@ -94,25 +93,32 @@ export function runBacktest(candles: Candle[], cfg: Config): BacktestResult {
       let exitPrice = 0;
       let exitReason: ExitReason | null = null;
 
+      const slip = cfg.slippageBps / 10_000;
+
       // Stop loss (account for gaps: if open is below stop, fill at open)
+      // Worst-case fill: apply negative slippage to SL fill
       if (c.low <= stopLoss) {
-        exitPrice = c.open <= stopLoss ? c.open : stopLoss;
+        const base = c.open <= stopLoss ? c.open : stopLoss;
+        exitPrice = base * (1 - slip);
         exitReason = 'stop_loss';
       }
       // Trailing stop (account for gaps)
       else if (trailActive && c.low <= trailStop) {
-        exitPrice = c.open <= trailStop ? c.open : trailStop;
+        const base = c.open <= trailStop ? c.open : trailStop;
+        exitPrice = base * (1 - slip);
         exitReason = 'trailing_stop';
       }
-      // Timeout
+      // Timeout — exit at close with slippage
       else if (i - entryIdx >= cfg.maxHoldBars) {
-        exitPrice = c.close;
+        exitPrice = c.close * (1 - slip);
         exitReason = 'timeout';
       }
 
       if (exitReason) {
         const rawPnl = (exitPrice - entryPrice) * qty;
-        const fees = posSize * cfg.feeRate * 2;
+        const entryFee = qty * entryPrice * cfg.feeRate;
+        const exitFee  = qty * exitPrice  * cfg.feeRate;
+        const fees = entryFee + exitFee;
         const netPnl = rawPnl - fees;
         const initialRisk = Math.abs(entryPrice - stopLoss) * qty;
 

@@ -9,7 +9,7 @@
  */
 
 import { DEFAULT_CONFIG, type Config } from './server/intraday/config.js';
-import { fetchCandles, type Interval } from './server/intraday/data-fetcher.js';
+import { fetchCandles } from './server/intraday/data-fetcher.js';
 import { runBacktest } from './server/intraday/backtest.js';
 import type { Trade, Metrics } from './server/intraday/types.js';
 
@@ -39,6 +39,11 @@ function parseArgs(): { symbols: string[]; perYear: boolean; config: Config } {
     else overrides[key] = isNaN(Number(val)) ? val : Number(val);
   }
 
+  // --feePct=0.04 → feeRate=0.0004 (convenience alias)
+  if ('feePct' in overrides) {
+    overrides['feeRate'] = (overrides['feePct'] as number) / 100;
+    delete overrides['feePct'];
+  }
   const config: Config = { ...DEFAULT_CONFIG, ...overrides } as Config;
   return { symbols, perYear, config };
 }
@@ -78,9 +83,10 @@ async function main() {
   console.log(`  Interval:  ${config.interval}`);
   console.log(`  Lookback:  ${config.lookbackDays} days`);
   console.log(`  Symbols:   ${symbols.join(', ')}`);
+  console.log(`  Fee:       ${(config.feeRate * 100).toFixed(3)}%/side  Slippage: ${config.slippageBps}bps`);
 
   const paramKeys = Object.entries(config)
-    .filter(([k]) => !['symbol', 'interval', 'strategy', 'lookbackDays', 'initialCapital', 'feeRate'].includes(k))
+    .filter(([k]) => !['symbol', 'interval', 'strategy', 'lookbackDays', 'initialCapital', 'feeRate', 'slippageBps'].includes(k))
     .filter(([, v]) => typeof v === 'number' || typeof v === 'boolean')
     .map(([k, v]) => `${k}=${v}`)
     .join('  ');

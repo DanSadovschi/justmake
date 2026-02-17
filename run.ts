@@ -5,7 +5,9 @@
  *   npx tsx run.ts --lookbackDays=180 --slAtrMultiple=2.5 --rsiMax=65
  */
 
+import { execSync } from 'node:child_process';
 import { DEFAULT_CONFIG, type Config } from './server/intraday/config.js';
+import { validateConfig } from './server/intraday/configSchema.js';
 import { fetchCandles } from './server/intraday/data-fetcher.js';
 import { runBacktest } from './server/intraday/backtest.js';
 import type { Trade, Metrics } from './server/intraday/types.js';
@@ -20,6 +22,11 @@ function parseArgs(): Partial<Config> {
     if (val === 'true') overrides[key] = true;
     else if (val === 'false') overrides[key] = false;
     else overrides[key] = isNaN(Number(val)) ? val : Number(val);
+  }
+  // --feePct=0.04 → feeRate=0.0004 (convenience alias)
+  if ('feePct' in overrides) {
+    overrides['feeRate'] = (overrides['feePct'] as number) / 100;
+    delete overrides['feePct'];
   }
   return overrides as Partial<Config>;
 }
@@ -65,7 +72,7 @@ function printConfig(cfg: Config): void {
   if (cfg.strategy === 'scoring_simple') console.log(`  Scoring Simple: threshold=${cfg.scoreThreshold}/3  ADX>=${cfg.adxThreshold}  RSI<${cfg.rsiMax}  EMA200=${cfg.useEma200Filter}`);
   console.log(`  Risk: ${cfg.riskPerTrade * 100}%/trade  Min R:R: 1:${cfg.minRiskReward}`);
   console.log(`  MaxHold: ${cfg.maxHoldBars}bars  Cooldown: ${cfg.cooldownBars}bars  MinConf: ${cfg.minConfidence}`);
-  console.log(`  Fees: ${cfg.feeRate * 100}%/side  Capital: $${cfg.initialCapital}`);
+  console.log(`  Fees: ${(cfg.feeRate * 100).toFixed(3)}%/side  Slippage: ${cfg.slippageBps}bps  Capital: $${cfg.initialCapital}`);
 }
 
 function printTrades(trades: Trade[], limit = 20): void {
@@ -87,11 +94,32 @@ function printTrades(trades: Trade[], limit = 20): void {
   }
 }
 
+function printMetadata(cfg: Config): void {
+  let commit = 'unknown';
+  try { commit = execSync('git rev-parse --short HEAD', { encoding: 'utf-8' }).trim(); } catch { /* no git */ }
+
+  console.log('\n── Run Metadata ──');
+  console.log(`  timestamp:    ${new Date().toISOString()}`);
+  console.log(`  commit:       ${commit}`);
+  console.log(`  symbol:       ${cfg.symbol}`);
+  console.log(`  interval:     ${cfg.interval}`);
+  console.log(`  lookbackDays: ${cfg.lookbackDays}`);
+  console.log(`  strategy:     ${cfg.strategy}`);
+  console.log(`  feeRate:      ${(cfg.feeRate * 100).toFixed(3)}%/side`);
+  console.log(`  slippageBps:  ${cfg.slippageBps}`);
+  console.log(`  slAtrMultiple:    ${cfg.slAtrMultiple}`);
+  console.log(`  trailActivateR:   ${cfg.trailActivateR}`);
+  console.log(`  trailAtrMultiple: ${cfg.trailAtrMultiple}`);
+  console.log(`  rsiMax:       ${cfg.rsiMax}`);
+  console.log(`  maxHoldBars:  ${cfg.maxHoldBars}`);
+}
+
 // ── Main ──
 async function main() {
   const overrides = parseArgs();
-  const cfg: Config = { ...DEFAULT_CONFIG, ...overrides };
+  const cfg: Config = validateConfig({ ...DEFAULT_CONFIG, ...overrides });
 
+  printMetadata(cfg);
   printConfig(cfg);
 
   console.log('\nFetching data...');
