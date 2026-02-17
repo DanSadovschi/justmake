@@ -9,7 +9,7 @@ import {
   emaClose, rsi as calcRsi, atr as calcAtr, volumeSma,
   adx as calcAdx, macd as calcMacd, bollingerBands, stochRsi as calcStochRsi,
 } from './indicators.js';
-import { checkSignal } from './strategy.js';
+import { checkSignal, type HtfData } from './strategy.js';
 
 // Need 200+ bars for EMA200 warmup
 const WARMUP = 210;
@@ -39,7 +39,7 @@ export function computeIndicators(candles: Candle[], cfg: Config): Indicators {
   };
 }
 
-export function runBacktest(candles: Candle[], cfg: Config): BacktestResult {
+export function runBacktest(candles: Candle[], cfg: Config, htf?: HtfData): BacktestResult {
   const ind = computeIndicators(candles, cfg);
 
   const trades: Trade[] = [];
@@ -59,6 +59,12 @@ export function runBacktest(candles: Candle[], cfg: Config): BacktestResult {
   let peakPrice = 0;
   let trailActive = false;
   let trailStop = -Infinity;
+
+  // Partial TP state
+  let partialTaken = false;
+  let partialPnl = 0;
+  let partialFees = 0;
+  const usePartial = cfg.partialTpR > 0 && cfg.partialTpPct > 0 && cfg.partialTpPct < 1;
 
   let pendingAtr = 0;
   let hasPending = false;
@@ -84,6 +90,9 @@ export function runBacktest(candles: Candle[], cfg: Config): BacktestResult {
       peakPrice = entryPrice;
       trailActive = false;
       trailStop = -Infinity;
+      partialTaken = false;
+      partialPnl = 0;
+      partialFees = 0;
       inPosition = qty > 0;
       hasPending = false;
     }
@@ -115,12 +124,16 @@ export function runBacktest(candles: Candle[], cfg: Config): BacktestResult {
       }
 
       if (exitReason) {
+        // Final exit: remaining qty PnL + any partial PnL already taken
         const rawPnl = (exitPrice - entryPrice) * qty;
-        const entryFee = qty * entryPrice * cfg.feeRate;
         const exitFee  = qty * exitPrice  * cfg.feeRate;
-        const fees = entryFee + exitFee;
-        const netPnl = rawPnl - fees;
-        const initialRisk = Math.abs(entryPrice - stopLoss) * qty;
+        // Entry fee only on remaining qty (partial already deducted its share)
+        const entryFee = partialTaken ? 0 : qty * entryPrice * cfg.feeRate;
+        const fees = entryFee + exitFee + partialFees;
+        const netPnl = rawPnl + partialPnl - fees;
+        // initialRisk based on original qty (before partial) for consistent R calc
+        const origQty = partialTaken ? qty / (1 - cfg.partialTpPct) : qty;
+        const initialRisk = Math.abs(entryPrice - stopLoss) * origQty;
 
         trades.push({
           id: ++tradeId,
@@ -145,6 +158,40 @@ export function runBacktest(candles: Candle[], cfg: Config): BacktestResult {
         const initialRisk = Math.abs(entryPrice - stopLoss);
         const unrealizedR = initialRisk > 0 ? (peakPrice - entryPrice) / initialRisk : 0;
 
+        // Partial take-profit: close partialTpPct of position at current close
+        if (usePartial && !partialTaken && unrealizedR >= cfg.partialTpR) {
+          const closeQty = qty * cfg.partialTpPct;
+          const partialExitPrice = c.close * (1 - cfg.slippageBps / 10_000);
+          const rawPartial = (partialExitPrice - entryPrice) * closeQty;
+          const pEntryFee = closeQty * entryPrice * cfg.feeRate;
+          const pExitFee  = closeQty * partialExitPrice * cfg.feeRate;
+          partialPnl = rawPartial;
+          partialFees = pEntryFee + pExitFee;
+          qty -= closeQty;
+          partialTaken = true;
+
+          // Record the partial exit as a separate trade for transparency
+          const origQty = qty + closeQty;
+          const totalRisk = Math.abs(entryPrice - stopLoss) * origQty;
+          trades.push({
+            id: ++tradeId,
+            entryTime,
+            entryPrice: rd(entryPrice),
+            exitTime: c.openTime,
+            exitPrice: rd(partialExitPrice),
+            pnl: rd(rawPartial - pEntryFee - pExitFee),
+            pnlPct: rd(((rawPartial - pEntryFee - pExitFee) / capital) * 100),
+            rMultiple: totalRisk > 0 ? rd((rawPartial - pEntryFee - pExitFee) / totalRisk) : 0,
+            holdBars: i - entryIdx,
+            exitReason: 'partial_tp',
+          });
+
+          capital += rawPartial - pEntryFee - pExitFee;
+          // Reset partial tracking — PnL already booked
+          partialPnl = 0;
+          partialFees = 0;
+        }
+
         if (!trailActive && unrealizedR >= cfg.trailActivateR) {
           trailActive = true;
         }
@@ -158,7 +205,7 @@ export function runBacktest(candles: Candle[], cfg: Config): BacktestResult {
 
     // 3. Generate signals (with cooldown + confidence filter)
     if (!inPosition && !hasPending && i >= cooldownUntil && capital > 0) {
-      const signal = checkSignal(candles, ind, i, cfg);
+      const signal = checkSignal(candles, ind, i, cfg, htf);
       if (signal && signal.confidence >= cfg.minConfidence) {
         pendingAtr = signal.atr;
         hasPending = true;

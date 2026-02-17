@@ -8,8 +8,9 @@
 import { execSync } from 'node:child_process';
 import { DEFAULT_CONFIG, type Config } from './server/intraday/config.js';
 import { validateConfig } from './server/intraday/configSchema.js';
-import { fetchCandles } from './server/intraday/data-fetcher.js';
-import { runBacktest } from './server/intraday/backtest.js';
+import { fetchCandles, htfInterval } from './server/intraday/data-fetcher.js';
+import { runBacktest, computeIndicators } from './server/intraday/backtest.js';
+import type { HtfData } from './server/intraday/strategy.js';
 import type { Trade, Metrics } from './server/intraday/types.js';
 
 // ── Parse CLI overrides ──
@@ -63,6 +64,8 @@ function printConfig(cfg: Config): void {
   console.log(`  Strategy: ${cfg.strategy.toUpperCase()}`);
   console.log(`  EMA: ${cfg.emaFast}/${cfg.emaSlow}/${cfg.emaTrend}  RSI: ${cfg.rsiPeriod} [${cfg.rsiMin}-${cfg.rsiMax}]`);
   console.log(`  SL: ${cfg.slAtrMultiple}xATR  Trail: activate ${cfg.trailActivateR}R, ${cfg.trailAtrMultiple}xATR`);
+  if (cfg.partialTpR > 0) console.log(`  Partial TP: ${(cfg.partialTpPct * 100).toFixed(0)}% at +${cfg.partialTpR}R`);
+  if (cfg.useHtfConfirm) console.log(`  HTF Confirm: ON (${htfInterval(cfg.interval) ?? 'N/A'})`);
   if (cfg.strategy === 'breakout') console.log(`  Breakout: period=${cfg.breakoutPeriod} volMult=${cfg.breakoutVolMult}`);
   if (cfg.strategy === 'pullback') console.log(`  Pullback: ${cfg.pullbackMaxPct}%`);
   if (cfg.strategy === 'momentum_adx') console.log(`  ADX threshold: ${cfg.adxThreshold}`);
@@ -130,8 +133,25 @@ async function main() {
     process.exit(1);
   }
 
+  // Fetch HTF candles if needed
+  let htf: HtfData | undefined;
+  if (cfg.useHtfConfirm) {
+    const htfInt = htfInterval(cfg.interval);
+    if (htfInt) {
+      console.log(`Fetching HTF (${htfInt}) data for confirmation...`);
+      const htfCandles = await fetchCandles(cfg.lookbackDays, htfInt, cfg.symbol);
+      if (htfCandles.length >= 220) {
+        htf = { candles: htfCandles, ind: computeIndicators(htfCandles, cfg) };
+      } else {
+        console.log(`[warn] Not enough HTF candles (${htfCandles.length}), running without HTF confirm`);
+      }
+    } else {
+      console.log(`[warn] No HTF available for ${cfg.interval}, running without HTF confirm`);
+    }
+  }
+
   console.log(`Running backtest on ${candles.length} candles...`);
-  const result = runBacktest(candles, cfg);
+  const result = runBacktest(candles, cfg, htf);
 
   printMetrics(result.metrics, cfg);
   printTrades(result.trades);

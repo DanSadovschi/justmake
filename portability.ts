@@ -9,8 +9,9 @@
  */
 
 import { DEFAULT_CONFIG, type Config } from './server/intraday/config.js';
-import { fetchCandles } from './server/intraday/data-fetcher.js';
-import { runBacktest } from './server/intraday/backtest.js';
+import { fetchCandles, htfInterval } from './server/intraday/data-fetcher.js';
+import { runBacktest, computeIndicators } from './server/intraday/backtest.js';
+import type { HtfData } from './server/intraday/strategy.js';
 import type { Trade, Metrics } from './server/intraday/types.js';
 
 // ── Parse CLI args ──
@@ -103,8 +104,20 @@ async function main() {
         continue;
       }
 
+      // Build HTF data if needed
+      let htf: HtfData | undefined;
+      if (config.useHtfConfirm) {
+        const htfInt = htfInterval(config.interval);
+        if (htfInt) {
+          const htfCandles = await fetchCandles(config.lookbackDays, htfInt, symbol);
+          if (htfCandles.length >= 220) {
+            htf = { candles: htfCandles, ind: computeIndicators(htfCandles, config) };
+          }
+        }
+      }
+
       const cfg: Config = { ...config, symbol };
-      const result = runBacktest(candles, cfg);
+      const result = runBacktest(candles, cfg, htf);
       results.push({ symbol, metrics: result.metrics, trades: result.trades });
     } catch (err) {
       console.log(`  [${symbol}] ERROR: ${(err as Error).message}\n`);

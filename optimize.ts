@@ -10,8 +10,9 @@
  */
 
 import { DEFAULT_CONFIG, type Config, type StrategyType } from './server/intraday/config.js';
-import { fetchCandles, type Interval } from './server/intraday/data-fetcher.js';
+import { fetchCandles, htfInterval, type Interval } from './server/intraday/data-fetcher.js';
 import { runBacktest, computeIndicators } from './server/intraday/backtest.js';
+import type { HtfData } from './server/intraday/strategy.js';
 import type { Candle, Metrics, Trade } from './server/intraday/types.js';
 
 const INTERVALS: Interval[] = ['15m', '1h', '4h'];
@@ -273,6 +274,18 @@ async function main() {
     candlesByInterval.set(interval, candles);
   }
 
+  // Pre-compute HTF data for each interval
+  const htfByInterval = new Map<Interval, HtfData | undefined>();
+  for (const interval of INTERVALS) {
+    const htfInt = htfInterval(interval);
+    if (htfInt) {
+      const htfCandles = candlesByInterval.get(htfInt);
+      if (htfCandles && htfCandles.length >= 220) {
+        htfByInterval.set(interval, { candles: htfCandles, ind: computeIndicators(htfCandles, DEFAULT_CONFIG) });
+      }
+    }
+  }
+
   console.log('\n── Starting grid search ──\n');
 
   const results: Result[] = [];
@@ -285,6 +298,8 @@ async function main() {
       continue;
     }
 
+    const htfData = htfByInterval.get(interval);
+
     for (const strategy of STRATEGIES) {
       const grid = { ...SHARED, ...SPECIFIC[strategy] };
       const allCombos = [...combos(grid)];
@@ -292,7 +307,9 @@ async function main() {
 
       for (const params of allCombos) {
         const cfg: Config = { ...DEFAULT_CONFIG, interval, strategy, ...params } as Config;
-        const result = runBacktest(candles, cfg);
+        // Pass HTF data only if useHtfConfirm is on for this combo
+        const htf = cfg.useHtfConfirm ? htfData : undefined;
+        const result = runBacktest(candles, cfg, htf);
         const s = score(result.metrics);
         results.push({
           interval,
@@ -426,7 +443,8 @@ async function main() {
       ...numericParams,
       useEma200Filter: false,
     } as Config;
-    const noFilterResult = runBacktest(candles, cfgNoFilter);
+    const htfAb = cfgNoFilter.useHtfConfirm ? htfByInterval.get(r.interval) : undefined;
+    const noFilterResult = runBacktest(candles, cfgNoFilter, htfAb);
     const mWith = r.metrics;
     const mWithout = noFilterResult.metrics;
 

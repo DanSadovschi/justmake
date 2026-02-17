@@ -62,6 +62,13 @@ export interface Config {
   trailActivateR: number;   // 1.0 — activate after +1R
   trailAtrMultiple: number; // 1.0 — trail by 1×ATR
 
+  // Partial take-profit
+  partialTpR: number;       // 0 = disabled, e.g. 1.5 = take partial at +1.5R
+  partialTpPct: number;     // 0.5 = close 50% of position at partialTpR
+
+  // Higher-timeframe confirmation
+  useHtfConfirm: boolean;   // false — require HTF trend alignment
+
   // Limits
   maxHoldBars: number;    // 48 = 2 days on 1H
   cooldownBars: number;   // 6 = 6 hours
@@ -119,6 +126,11 @@ export const DEFAULT_CONFIG: Config = {
 
   trailActivateR: 1.0,
   trailAtrMultiple: 1.0,
+
+  partialTpR: 0,
+  partialTpPct: 0.5,
+
+  useHtfConfirm: false,
 
   maxHoldBars: 48,
   cooldownBars: 6,

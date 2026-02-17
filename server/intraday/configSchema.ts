@@ -56,6 +56,11 @@ export const configSchema = z.object({
   trailActivateR: z.number().positive('trailActivateR must be > 0'),
   trailAtrMultiple: z.number().positive('trailAtrMultiple must be > 0'),
 
+  partialTpR: z.number().nonnegative(),
+  partialTpPct: z.number().min(0).max(1, 'partialTpPct must be 0–1 (fraction)'),
+
+  useHtfConfirm: z.boolean(),
+
   maxHoldBars: z.number().int().positive(),
   cooldownBars: z.number().int().nonnegative(),
   minConfidence: z.number().min(0).max(100),

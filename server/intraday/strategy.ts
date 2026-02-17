@@ -6,6 +6,44 @@
 import type { Config } from './config.js';
 import type { Candle, Indicators, Signal } from './types.js';
 
+// ── HTF confirmation data (optional) ──
+
+export interface HtfData {
+  candles: Candle[];
+  ind: Indicators;
+}
+
+/**
+ * Find the most recent HTF candle at or before the given timestamp.
+ * Uses binary search for efficiency.
+ */
+function findHtfIdx(htfCandles: Candle[], timestamp: number): number {
+  let lo = 0, hi = htfCandles.length - 1;
+  let best = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >>> 1;
+    if (htfCandles[mid].openTime <= timestamp) {
+      best = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return best;
+}
+
+/**
+ * HTF trend confirmation gate.
+ * Returns false (blocks signal) if useHtfConfirm is on and HTF trend is not aligned.
+ * Checks: HTF EMA20 > EMA50 (trend direction on higher timeframe).
+ */
+function htfGate(timestamp: number, cfg: Config, htf?: HtfData): boolean {
+  if (!cfg.useHtfConfirm || !htf) return true;
+  const hi = findHtfIdx(htf.candles, timestamp);
+  if (hi < 0) return true; // no HTF data yet, don't block
+  return htf.ind.ema20[hi] > htf.ind.ema50[hi];
+}
+
 // ── Dispatcher ──
 
 export function checkSignal(
@@ -13,7 +51,11 @@ export function checkSignal(
   ind: Indicators,
   idx: number,
   cfg: Config,
+  htf?: HtfData,
 ): Signal | null {
+  // HTF confirmation gate — applied to ALL strategies
+  if (!htfGate(candles[idx].openTime, cfg, htf)) return null;
+
   switch (cfg.strategy) {
     case 'pullback':      return checkPullback(candles, ind, idx, cfg);
     case 'breakout':      return checkBreakout(candles, ind, idx, cfg);

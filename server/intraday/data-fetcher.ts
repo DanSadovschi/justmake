@@ -10,6 +10,13 @@ const BINANCE_LIMIT = 1000;
 
 export type Interval = '15m' | '1h' | '4h';
 
+/** Map interval → its higher timeframe. Returns null for 4h (highest supported). */
+export function htfInterval(interval: Interval): Interval | null {
+  if (interval === '15m') return '1h';
+  if (interval === '1h') return '4h';
+  return null; // 4h has no HTF
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise(r => setTimeout(r, ms));
 }

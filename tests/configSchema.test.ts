@@ -89,4 +89,22 @@ describe('Config Schema Validation', () => {
     const result = configSchema.safeParse(cfg);
     expect(result.success).toBe(true);
   });
+
+  it('rejects partialTpPct > 1', () => {
+    const cfg = { ...DEFAULT_CONFIG, partialTpPct: 1.5 };
+    const result = configSchema.safeParse(cfg);
+    expect(result.success).toBe(false);
+  });
+
+  it('accepts partialTpR = 0 (disabled)', () => {
+    const cfg = { ...DEFAULT_CONFIG, partialTpR: 0, partialTpPct: 0.5 };
+    const result = configSchema.safeParse(cfg);
+    expect(result.success).toBe(true);
+  });
+
+  it('accepts useHtfConfirm boolean', () => {
+    const cfg = { ...DEFAULT_CONFIG, useHtfConfirm: true };
+    const result = configSchema.safeParse(cfg);
+    expect(result.success).toBe(true);
+  });
 });

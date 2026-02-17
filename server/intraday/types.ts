@@ -11,7 +11,7 @@ export interface Candle {
   volume: number;
 }
 
-export type ExitReason = 'stop_loss' | 'trailing_stop' | 'timeout';
+export type ExitReason = 'stop_loss' | 'trailing_stop' | 'timeout' | 'partial_tp';
 
 export interface Signal {
   entryZone: number;
